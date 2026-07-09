@@ -1,0 +1,142 @@
+.aap-overlay {
+  position: absolute;
+  inset: 0;
+}
+
+.aap-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+.aap-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 0;
+  margin-bottom: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.aap-status {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-left: auto;
+}
+
+.aap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #e5e7eb;
+  cursor: pointer;
+}
+
+.aap-toggle-checkbox {
+  margin: 0;
+  cursor: pointer;
+  accent-color: #2dd4bf;
+}
+
+.aap-toggle-checkbox:disabled {
+  cursor: not-allowed;
+}
+
+.aap-toggle:has(.aap-toggle-checkbox:disabled) {
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+.aap-tooltip {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  background: #16181d;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: inherit;
+  color: #e5e7eb;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  min-width: 200px;
+}
+
+.aap-tt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 2px;
+}
+
+.aap-tt-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.aap-tt-stats b {
+  color: #e5e7eb;
+  font-weight: 600;
+}
+
+.aap-tt-subtitle {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.aap-tt-note {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.aap-tt-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+
+.aap-tt-table th,
+.aap-tt-table td {
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+.aap-tt-table th {
+  font-size: 10px;
+  font-weight: 500;
+  color: #6b7280;
+  text-align: right;
+  padding-left: 12px;
+}
+
+.aap-tt-table td:first-child,
+.aap-tt-table th:first-child {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aap-tt-table td:not(:first-child) {
+  text-align: right;
+  padding-left: 12px;
+}
+
+.aap-tt-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}

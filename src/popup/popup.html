@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Apify Analytics Plus</title>
+  </head>
+  <body>
+    <header class="hd">
+      <span class="logo">📊</span>
+      <span class="name">Apify Analytics Plus</span>
+    </header>
+
+    <section class="card">
+      <div class="card-title">What this does</div>
+      <p class="blurb">
+        On the Console's <strong>Monetization insights</strong> page, adds a
+        breakdown panel below the chart: click a day to see which Actors
+        drove that day's revenue, cost, profit and runs.
+      </p>
+    </section>
+
+    <section class="card">
+      <div class="card-title">Cached breakdowns</div>
+      <div id="cache-body" class="muted">Loading…</div>
+      <div class="row">
+        <button id="clear-cache">Clear cache</button>
+      </div>
+    </section>
+
+    <footer class="ft">
+      <a id="open-insights" href="https://console.apify.com/actors/insights/monetization" target="_blank" rel="noopener">
+        Open Insights →
+      </a>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

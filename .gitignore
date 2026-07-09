@@ -1,0 +1,3 @@
+# Built, loadable packages — regenerate with `node build.mjs`
+dist/
+*.zip
