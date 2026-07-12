@@ -14,6 +14,14 @@
  * you flip months, so we can't read "which month is shown" from
  * location.href. Instead token-sniffer.js (MAIN world) watches the page's
  * own XHR/fetch calls and tells us the `month` query param of each one.
+ *
+ * The account-wide Revenue/Costs/Runs/Results headline numbers were only
+ * ever fetched once per month load, so they'd drift from Apify's own chart
+ * (which keeps recomputing) the longer a tab stayed open on a still-settling
+ * day. We now re-poll those same two endpoints on a timer (see
+ * DAY_METRICS_REFRESH_MS) so they stay live. A "Show original Apify chart"
+ * toolbar toggle un-hides the native canvas for a direct side-by-side check
+ * against our numbers.
  */
 (function () {
   const ROUTE = "/actors/insights/monetization";
@@ -23,15 +31,22 @@
   const OTHER_COLOR = "#6b7280";
   const TOP_N = PALETTE.length;
   const METRICS = [
-    { key: "revenue", label: "Revenue", color: "#4caf82", kind: "bar", axis: "left" },
+    { key: "revenue", label: "Revenue", color: "#12966f", kind: "bar", axis: "left" }, // matches Apify's own chart bar color
     { key: "runs", label: "Runs", color: "#22d3ee", kind: "line", axis: "right" },
     { key: "results", label: "Results", color: "#fb7185", kind: "line", axis: "right" },
   ];
+  const AXIS_LABEL_COLOR = "#666666"; // matches Apify's own chart axis labels
 
   const PREF_KEYS = {
     composition: "aap.compositionOn",
     metricsOn: "aap.metricsOn",
+    showNative: "aap.showNativeOn",
   };
+
+  // How often to re-fetch the cheap account-wide day totals while a month
+  // stays loaded, so a long-open tab doesn't show numbers from whenever it
+  // was first opened (recent days keep settling on Apify's side too).
+  const DAY_METRICS_REFRESH_MS = 60_000;
 
   const state = {
     month: null, // "2026-07-01", from the page's own requests
@@ -41,6 +56,7 @@
   chrome.storage.local.get(Object.values(PREF_KEYS)).then((r) => {
     compositionOn = !!r[PREF_KEYS.composition];
     if (r[PREF_KEYS.metricsOn]) metricsOn = { ...metricsOn, ...r[PREF_KEYS.metricsOn] };
+    showNativeOn = !!r[PREF_KEYS.showNative];
     syncToolbar();
     drawChart();
   });
@@ -92,31 +108,36 @@
     // visibility:hidden, not display:none — the wrapper has no height of its
     // own, it's sized by the canvas; hiding via display would collapse it to
     // 0px and our absolutely-positioned overlay would have nothing to fill.
+    // When "Show original Apify chart" is on, we flip this the other way:
+    // the native canvas is shown and our own overlay is display:none'd.
     const nativeCanvas = wrapper.querySelector("canvas:not(.aap-chart)");
-    if (nativeCanvas && nativeCanvas.style.visibility !== "hidden") nativeCanvas.style.visibility = "hidden";
+    if (nativeCanvas) nativeCanvas.style.visibility = showNativeOn ? "" : "hidden";
     if (getComputedStyle(wrapper).position === "static") wrapper.style.position = "relative";
 
     ensureToolbar(wrapper);
 
     let overlay = wrapper.querySelector(`.${OVERLAY_CLASS}`);
-    if (overlay) return overlay;
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = OVERLAY_CLASS;
 
-    overlay = document.createElement("div");
-    overlay.className = OVERLAY_CLASS;
+      const canvas = document.createElement("canvas");
+      canvas.className = "aap-chart";
+      overlay.appendChild(canvas);
 
-    const canvas = document.createElement("canvas");
-    canvas.className = "aap-chart";
-    overlay.appendChild(canvas);
+      const tooltip = document.createElement("div");
+      tooltip.className = "aap-tooltip";
+      tooltip.style.display = "none";
+      document.body.appendChild(tooltip); // fixed-position, outside clipped ancestors
 
-    const tooltip = document.createElement("div");
-    tooltip.className = "aap-tooltip";
-    tooltip.style.display = "none";
-    document.body.appendChild(tooltip); // fixed-position, outside clipped ancestors
+      canvas.addEventListener("mousemove", onHover);
+      canvas.addEventListener("mouseleave", hideTooltip);
 
-    canvas.addEventListener("mousemove", onHover);
-    canvas.addEventListener("mouseleave", hideTooltip);
+      wrapper.appendChild(overlay);
+    }
 
-    wrapper.appendChild(overlay);
+    overlay.style.display = showNativeOn ? "none" : "";
+    if (showNativeOn) hideTooltip();
     return overlay;
   }
 
@@ -172,6 +193,20 @@
     breakdownLabel.appendChild(document.createTextNode("Breakdown by actor"));
     toolbar.appendChild(breakdownLabel);
 
+    const nativeLabel = document.createElement("label");
+    nativeLabel.className = "aap-toggle";
+    const nativeBox = document.createElement("input");
+    nativeBox.type = "checkbox";
+    nativeBox.className = "aap-toggle-checkbox aap-native-checkbox";
+    nativeBox.addEventListener("change", () => {
+      showNativeOn = nativeBox.checked;
+      chrome.storage.local.set({ [PREF_KEYS.showNative]: showNativeOn });
+      drawChart();
+    });
+    nativeLabel.appendChild(nativeBox);
+    nativeLabel.appendChild(document.createTextNode("Show original Apify chart"));
+    toolbar.appendChild(nativeLabel);
+
     const status = document.createElement("span");
     status.className = "aap-status";
     toolbar.appendChild(status);
@@ -198,6 +233,8 @@
     breakdownBox.checked = compositionOn;
     breakdownBox.disabled = !metricsOn.revenue;
     breakdownBox.title = breakdownBox.disabled ? "Enable Revenue to see the actor breakdown" : "";
+
+    toolbar.querySelector(".aap-native-checkbox").checked = showNativeOn;
   }
 
   function unmountOverlay() {
@@ -225,19 +262,47 @@
     if (!overlay) return;
     if (state.month && state.month !== loadedMonth) {
       loadedMonth = state.month;
-      loadAndRender(state.month).catch(() => {});
+      loadAndRender(state.month).catch(() => {}); // sets dayMetricsFetchedAt itself on success
       return;
+    }
+    if (state.month && Date.now() - dayMetricsFetchedAt > DAY_METRICS_REFRESH_MS) {
+      refreshDayMetrics(state.month);
     }
     if (lastData) drawChart();
   }, 400);
   window.addEventListener("beforeunload", () => clearInterval(poll));
+
+  // Re-fetches just the account-wide day totals (not the per-Actor
+  // breakdown) so the headline Revenue/Costs/Runs/Results stay live for as
+  // long as the tab is left open on this page, instead of freezing at
+  // whatever they were when the month was first loaded.
+  async function refreshDayMetrics(month) {
+    if (dayMetricsFetching) return;
+    dayMetricsFetching = true;
+    try {
+      const [margin, runs] = await Promise.all([
+        AAP_API.profitMargin(month, []),
+        AAP_API.runStatistics(month, []),
+      ]);
+      if (month !== state.month) return; // user switched months mid-flight
+      dayMetricsFetchedAt = Date.now();
+      setData({ dayMetrics: buildDayMetrics(margin, runs) });
+    } catch {
+      dayMetricsFetchedAt = Date.now(); // back off; retry after the next interval regardless
+    } finally {
+      dayMetricsFetching = false;
+    }
+  }
 
   // ---- data ------------------------------------------------------------
   let indexRun = 0; // guards against a stale index finishing after a month switch
   let lastData = null; // { month, dayMetrics, daily, actorCount, indexedAt, indexing, progress, error }
   let compositionOn = false;
   let metricsOn = { revenue: true, runs: false, results: false };
+  let showNativeOn = false;
   let colorByActorId = new Map();
+  let dayMetricsFetchedAt = 0;
+  let dayMetricsFetching = false;
 
   async function loadAndRender(month) {
     const overlay = ensureOverlay();
@@ -250,21 +315,14 @@
     let indexing = !cached || cached.stale;
     if (daily) colorByActorId = buildColorMap(daily);
 
-    setData({ month, daily, actorCount, indexedAt, indexing, progress: null });
+    if (cached?.dayMetrics) setData({ month, daily, actorCount, indexedAt, indexing, dayMetrics: cached.dayMetrics, progress: null });
+    else setData({ month, daily, actorCount, indexedAt, indexing, progress: null });
 
     // Always fetch the cheap account-wide day totals so the chart is
-    // accurate even while (or instead of) a full re-index runs.
-    let dayMetrics = cached?.dayMetrics || null;
-    try {
-      const [margin, runs] = await Promise.all([
-        AAP_API.profitMargin(month, []),
-        AAP_API.runStatistics(month, []),
-      ]);
-      dayMetrics = buildDayMetrics(margin, runs);
-      setData({ month, daily, actorCount, indexedAt, indexing, dayMetrics, progress: null });
-    } catch {
-      /* keep whatever we had */
-    }
+    // accurate even while (or instead of) a full re-index runs. Shares
+    // refreshDayMetrics with the periodic poll so the two never race.
+    await refreshDayMetrics(month);
+    let dayMetrics = lastData?.dayMetrics || cached?.dayMetrics || null;
 
     if (!indexing) return;
 
@@ -311,6 +369,12 @@
 
   // Merges profit-margin + run-statistics into
   // { [date]: { revenue, cost, profit, margin, runs, results, successRate } }.
+  //
+  // profit-margin returns BOTH `payingUsersUsd` and `allUsersUsd` per day.
+  // The Console's own chart (and its "only paying users generate revenue and
+  // costs" caption) uses `payingUsersUsd` — `allUsersUsd` is a superset that
+  // folds in free-tier usage, which inflates Revenue/Costs above what Apify
+  // itself displays. Use payingUsersUsd to match.
   function buildDayMetrics(margin, runs) {
     const days = new Set([
       ...Object.keys(margin?.dailyProfitMarginStats || {}),
@@ -318,7 +382,7 @@
     ]);
     const out = {};
     for (const day of days) {
-      const m = margin?.dailyProfitMarginStats?.[day]?.allUsersUsd;
+      const m = margin?.dailyProfitMarginStats?.[day]?.payingUsersUsd;
       const r = runs?.dailyStats?.[day];
       out[day] = {
         revenue: m?.revenueUsd ?? 0,
@@ -353,7 +417,7 @@
       const runsByDay = runs?.dailyStats || {};
       const days = new Set([...Object.keys(marginByDay), ...Object.keys(runsByDay)]);
       for (const day of days) {
-        const m = marginByDay[day]?.allUsersUsd;
+        const m = marginByDay[day]?.payingUsersUsd; // see buildDayMetrics
         const r = runsByDay[day];
         if (!m && !r) continue;
         const row = {
@@ -405,6 +469,19 @@
   // independent scales visually aligned on one set of horizontal lines.
   const PAD = { left: 56, right: 56, top: 12, bottom: 22 };
   const AXIS_GUTTER = 48; // width reserved per right-side axis column
+  const TICK_INTERVALS = 7; // 7 gridline steps above $0 — reproduces Apify's own 0/50/100/.../350 spacing
+
+  // Rounds a data max up to a "nice" axis max (1/2/5 x a power of ten) split
+  // into `intervals` even steps, e.g. 327.93 over 7 intervals -> 350 (steps
+  // of 50) — the same rounding Apify's own chart uses for its $ axis.
+  function niceAxisMax(maxValue, intervals) {
+    if (maxValue <= 0) return intervals;
+    const rawStep = maxValue / intervals;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const norm = rawStep / mag;
+    const niceNorm = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+    return niceNorm * mag * intervals;
+  }
 
   function drawChart() {
     const overlay = ensureOverlay();
@@ -451,10 +528,15 @@
     const plotW = rect.width - leftPad - rightPad;
     const plotH = rect.height - PAD.top - PAD.bottom;
 
-    const leftMax = showLeft ? Math.max(1, ...days.map((d) => metricValue(d, "revenue"))) * 1.12 : 1;
+    const leftMax = showLeft
+      ? niceAxisMax(Math.max(1, ...days.map((d) => metricValue(d, "revenue"))), TICK_INTERVALS)
+      : 1;
     // Each line metric gets its own scale — see the note on PAD above.
     const lineMax = new Map(
-      lineMetrics.map((m) => [m.key, Math.max(1, ...days.map((d) => metricValue(d, m.key))) * 1.12]),
+      lineMetrics.map((m) => [
+        m.key,
+        niceAxisMax(Math.max(1, ...days.map((d) => metricValue(d, m.key))), TICK_INTERVALS),
+      ]),
     );
 
     const slot = plotW / days.length;
@@ -462,9 +544,13 @@
 
     // gridlines, shared across every axis (see comment above)
     ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.font = "11px inherit";
+    // Canvas 2D's `font` has no "inherit" keyword (unlike CSS) — an invalid
+    // value here is silently dropped, leaving the browser's ~10px default,
+    // which is why this always rendered smaller than Apify's own chart no
+    // matter what size was requested. Read the page's real font stack instead.
+    ctx.font = `13px ${getComputedStyle(wrapper).fontFamily || "sans-serif"}`;
     ctx.textBaseline = "middle";
-    const ticks = 4;
+    const ticks = TICK_INTERVALS;
     for (let i = 0; i <= ticks; i++) {
       const frac = i / ticks;
       const y = PAD.top + plotH * (1 - frac);
@@ -473,7 +559,7 @@
       ctx.lineTo(rect.width - rightPad, y);
       ctx.stroke();
       if (showLeft) {
-        ctx.fillStyle = "#9ca3af";
+        ctx.fillStyle = AXIS_LABEL_COLOR;
         ctx.textAlign = "right";
         ctx.fillText(AAPF.money(leftMax * frac), leftPad - 8, y);
       }
@@ -492,7 +578,7 @@
     days.forEach((day, i) => {
       if (i % labelEvery === 0 || i === days.length - 1) {
         const x = leftPad + i * slot + slot / 2;
-        ctx.fillStyle = "#9ca3af";
+        ctx.fillStyle = AXIS_LABEL_COLOR;
         ctx.fillText(AAPF.shortDate(day), x, rect.height - PAD.bottom + 6);
       }
     });
@@ -581,8 +667,17 @@
 
     const dm = (lastData.dayMetrics || {})[day];
     const metric = primaryMetric();
+    const metricDef = METRICS.find((m) => m.key === metric);
+    const headlineValue = metric === "revenue" ? AAPF.money(dm?.revenue ?? 0) : AAPF.compact(dm?.[metric] ?? 0);
 
-    let html = `<div class="aap-tt-title">${AAPF.shortDate(day)}</div>`;
+    // Headline metric + value up top (matching Apify's own tooltip), date
+    // just below it, then our fuller day/actor breakdown underneath.
+    let html = `<div class="aap-tt-header">`;
+    html += `<span class="aap-tt-dot" style="background:${metricDef.color}"></span>`;
+    html += `<span class="aap-tt-header-label">${metricDef.label}</span>`;
+    html += `<span class="aap-tt-header-value">${headlineValue}</span>`;
+    html += "</div>";
+    html += `<div class="aap-tt-date">${AAPF.shortDate(day)}</div>`;
     html += '<div class="aap-tt-stats">';
     html += `<span>Revenue <b>${AAPF.money(dm?.revenue ?? 0)}</b></span>`;
     html += `<span>Costs <b>${AAPF.money(dm?.cost ?? 0)}</b></span>`;

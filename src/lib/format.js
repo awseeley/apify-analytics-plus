@@ -24,10 +24,11 @@
     return String(Number(dateStr.slice(8, 10)));
   }
 
-  // "2026-07-08" -> "Jul 8"
+  // "2026-07-08" -> "Jul 8" (matches Apify's own chart; hardcoded to en-US
+  // so the month-then-day order doesn't flip under a day-first browser locale)
   function shortDate(dateStr) {
     const d = new Date(dateStr + "T00:00:00Z");
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
   }
 
   self.AAPF = { money, pct, compact, dayOfMonth, shortDate };
