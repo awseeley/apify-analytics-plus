@@ -42,6 +42,14 @@
   accent-color: #2dd4bf;
 }
 
+/* Keeps the colour dot vertically centred with, and tight against, its label
+   text — the dot's own margin-right handles the small gap to the text, and
+   the row's flex `gap` handles the space back to the checkbox. */
+.aap-toggle-label {
+  display: inline-flex;
+  align-items: center;
+}
+
 .aap-toggle-checkbox:disabled {
   cursor: not-allowed;
 }

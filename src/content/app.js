@@ -171,11 +171,18 @@
         drawChart();
       });
       label.appendChild(box);
+      // Group the dot with the label text so it reads as belonging to the
+      // label. If the dot were a direct flex child of .aap-toggle, the row's
+      // `gap` would sit between the dot and the text ON TOP OF the dot's own
+      // margin-right, pushing the dot oddly far from its label.
+      const labelText = document.createElement("span");
+      labelText.className = "aap-toggle-label";
       const dot = document.createElement("span");
       dot.className = "aap-tt-dot";
       dot.style.background = m.color;
-      label.appendChild(dot);
-      label.appendChild(document.createTextNode(m.label));
+      labelText.appendChild(dot);
+      labelText.appendChild(document.createTextNode(m.label));
+      label.appendChild(labelText);
       toolbar.appendChild(label);
     }
 
@@ -598,9 +605,17 @@
             const key = colorByActorId.get(row.actorId) || OTHER_COLOR;
             grouped.set(key, (grouped.get(key) || 0) + (row.revenue || 0));
           }
-          const sumRows = [...grouped.entries()].sort((a, b) =>
-            a[0] === OTHER_COLOR ? 1 : b[0] === OTHER_COLOR ? -1 : 0,
-          );
+          // Stack every bar in the SAME order — by each Actor's month-long
+          // revenue rank (its position in PALETTE), with the merged "other
+          // Actors" grey band always on top. Without this, segments are drawn
+          // in whatever order Actors happened to be active that day, so a
+          // given Actor's colour lands in a different band on each bar and
+          // looks like it changed colour from day to day.
+          const rank = (color) => {
+            const i = PALETTE.indexOf(color);
+            return i === -1 ? Infinity : i; // OTHER_COLOR (not in PALETTE) sorts last → top of stack
+          };
+          const sumRows = [...grouped.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
           const rowsTotal = [...grouped.values()].reduce((s, v) => s + v, 0) || 1;
           for (const [color, value] of sumRows) {
             const segH = (value / rowsTotal) * barH;
