@@ -3,7 +3,12 @@
     const all = await chrome.storage.local.get(null);
     const entries = Object.entries(all)
       .filter(([k]) => k.startsWith("aap.breakdown."))
-      .map(([k, v]) => ({ month: k.replace("aap.breakdown.", ""), ...v }))
+      .map(([k, v]) => {
+        // key is "aap.breakdown.<month>" or "aap.breakdown.<month>:<actorIds>"
+        // when the view was scoped to the native Actor filter
+        const [month, scope] = k.replace("aap.breakdown.", "").split(":");
+        return { month, filtered: !!scope, ...v };
+      })
       .sort((a, b) => b.month.localeCompare(a.month));
 
     const body = document.getElementById("cache-body");
@@ -18,7 +23,7 @@
       const row = document.createElement("div");
       row.className = "cache-row";
       const label = document.createElement("span");
-      label.textContent = e.month;
+      label.textContent = e.filtered ? `${e.month} (filtered)` : e.month;
       const meta = document.createElement("span");
       const actors = e.actorCount != null ? `${e.actorCount} actors` : "–";
       const when = e.updatedAt ? new Date(e.updatedAt).toLocaleTimeString() : "";

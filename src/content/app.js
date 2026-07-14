@@ -50,8 +50,15 @@
 
   const state = {
     month: null, // "2026-07-01", from the page's own requests
-    filtered: false, // true when the user has the native "Actor" filter set
+    actorIds: [], // native "Actor" filter, sniffed from those same requests ([] = all)
   };
+
+  // One string identifying what should currently be rendered: month + filter.
+  // Everything that loads or lands async compares against this, so a month
+  // switch and a filter switch are handled identically.
+  function scopeKey() {
+    return state.month ? `${state.month}|${state.actorIds.join(",")}` : null;
+  }
 
   chrome.storage.local.get(Object.values(PREF_KEYS)).then((r) => {
     compositionOn = !!r[PREF_KEYS.composition];
@@ -72,11 +79,12 @@
   // the anchor shows up. The poll below is the single place that decides
   // whether to (re)load, once it can confirm there's somewhere to render.
   window.addEventListener("aap-request-seen", (e) => {
-    const { month, actorIdsCount } = e.detail;
+    const { month, actorIds } = e.detail;
     if (!month) return;
-    state.filtered = actorIdsCount > 0;
-    if (state.filtered) unmountOverlay();
-    else state.month = month;
+    state.month = month;
+    // Sorted so the same filter always yields the same scopeKey/cache key
+    // regardless of the order the page put the ids in the query string.
+    state.actorIds = [...(actorIds || [])].sort();
   });
 
   // ---- SPA route watcher ---------------------------------------------------
@@ -262,18 +270,19 @@
   // the native canvas). Every 400ms: make sure the overlay/toolbar exist and
   // the native canvas is hidden, load whichever month we've most recently
   // learned about if we haven't already, and otherwise just redraw.
-  let loadedMonth = null;
+  let loadedKey = null;
   const poll = setInterval(() => {
-    if (location.pathname !== ROUTE || state.filtered) return;
+    if (location.pathname !== ROUTE) return;
     const overlay = ensureOverlay();
     if (!overlay) return;
-    if (state.month && state.month !== loadedMonth) {
-      loadedMonth = state.month;
-      loadAndRender(state.month).catch(() => {}); // sets dayMetricsFetchedAt itself on success
+    const key = scopeKey();
+    if (key && key !== loadedKey) {
+      loadedKey = key;
+      loadAndRender(state.month, state.actorIds).catch(() => {}); // sets dayMetricsFetchedAt itself on success
       return;
     }
-    if (state.month && Date.now() - dayMetricsFetchedAt > DAY_METRICS_REFRESH_MS) {
-      refreshDayMetrics(state.month);
+    if (key && Date.now() - dayMetricsFetchedAt > DAY_METRICS_REFRESH_MS) {
+      refreshDayMetrics(state.month, state.actorIds);
     }
     if (lastData) drawChart();
   }, 400);
@@ -283,15 +292,16 @@
   // breakdown) so the headline Revenue/Costs/Runs/Results stay live for as
   // long as the tab is left open on this page, instead of freezing at
   // whatever they were when the month was first loaded.
-  async function refreshDayMetrics(month) {
+  async function refreshDayMetrics(month, actorIds) {
     if (dayMetricsFetching) return;
     dayMetricsFetching = true;
+    const key = `${month}|${actorIds.join(",")}`;
     try {
       const [margin, runs] = await Promise.all([
-        AAP_API.profitMargin(month, []),
-        AAP_API.runStatistics(month, []),
+        AAP_API.profitMargin(month, actorIds),
+        AAP_API.runStatistics(month, actorIds),
       ]);
-      if (month !== state.month) return; // user switched months mid-flight
+      if (key !== scopeKey()) return; // user switched month/filter mid-flight
       dayMetricsFetchedAt = Date.now();
       setData({ dayMetrics: buildDayMetrics(margin, runs) });
     } catch {
@@ -311,11 +321,12 @@
   let dayMetricsFetchedAt = 0;
   let dayMetricsFetching = false;
 
-  async function loadAndRender(month) {
+  async function loadAndRender(month, actorIds) {
     const overlay = ensureOverlay();
     if (!overlay) return;
+    const scope = actorIds.join(",");
 
-    const cached = await AAP_CACHE.get(month);
+    const cached = await AAP_CACHE.get(month, scope);
     let daily = cached?.daily || null;
     let actorCount = cached?.actorCount ?? null;
     let indexedAt = cached?.updatedAt ?? null;
@@ -325,17 +336,18 @@
     if (cached?.dayMetrics) setData({ month, daily, actorCount, indexedAt, indexing, dayMetrics: cached.dayMetrics, progress: null });
     else setData({ month, daily, actorCount, indexedAt, indexing, progress: null });
 
-    // Always fetch the cheap account-wide day totals so the chart is
-    // accurate even while (or instead of) a full re-index runs. Shares
-    // refreshDayMetrics with the periodic poll so the two never race.
-    await refreshDayMetrics(month);
+    // Always fetch the cheap day totals (scoped to the native Actor filter,
+    // if any) so the chart is accurate even while (or instead of) a full
+    // re-index runs. Shares refreshDayMetrics with the periodic poll so the
+    // two never race.
+    await refreshDayMetrics(month, actorIds);
     let dayMetrics = lastData?.dayMetrics || cached?.dayMetrics || null;
 
     if (!indexing) return;
 
     const myRun = ++indexRun;
     try {
-      const raw = await AAP_API.actorBreakdown(month, []);
+      const raw = await AAP_API.actorBreakdown(month, actorIds);
       const breakdown = Array.isArray(raw) ? raw : raw?.monetizationPerActor || [];
       const paidActors = breakdown
         .map((item) => ({
@@ -366,7 +378,7 @@
       colorByActorId = buildColorMap(daily);
       actorCount = paidActors.length;
       indexedAt = Date.now();
-      await AAP_CACHE.set(month, { daily, actorCount, dayMetrics });
+      await AAP_CACHE.set(month, scope, { daily, actorCount, dayMetrics });
       setData({ month, daily, actorCount, indexedAt, indexing: false, dayMetrics, progress: null });
     } catch (err) {
       if (myRun !== indexRun) return;
@@ -474,9 +486,21 @@
   // at even fractions of the plot height, and every axis's own max is
   // mapped onto those same fractions — the standard way to keep several
   // independent scales visually aligned on one set of horizontal lines.
-  const PAD = { left: 56, right: 56, top: 12, bottom: 22 };
+  const PAD = { left: 56, top: 12, bottom: 22 };
   const AXIS_GUTTER = 48; // width reserved per right-side axis column
   const TICK_INTERVALS = 7; // 7 gridline steps above $0 — reproduces Apify's own 0/50/100/.../350 spacing
+
+  // Single source of truth for the plot's horizontal padding. drawChart and
+  // onHover MUST agree on this — each active line metric adds a right-side
+  // axis gutter that narrows the plot, and if hover assumes a different width
+  // it maps the cursor x to the wrong day.
+  function plotPads() {
+    const lineCount = METRICS.filter((m) => m.kind === "line" && metricsOn[m.key]).length;
+    return {
+      left: metricsOn.revenue ? PAD.left : 16,
+      right: 16 + lineCount * AXIS_GUTTER,
+    };
+  }
 
   // Rounds a data max up to a "nice" axis max (1/2/5 x a power of ten) split
   // into `intervals` even steps, e.g. 327.93 over 7 intervals -> 350 (steps
@@ -486,7 +510,10 @@
     const rawStep = maxValue / intervals;
     const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
     const norm = rawStep / mag;
-    const niceNorm = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+    // Round UP to the next nice step — snapping to the *nearest* one can pick
+    // a step below the data max (e.g. 3600/7 -> norm 5.14 -> 5 -> axis 3500),
+    // which draws the series past the top of the plot.
+    const niceNorm = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
     return niceNorm * mag * intervals;
   }
 
@@ -528,10 +555,8 @@
 
     const showLeft = metricsOn.revenue;
     const lineMetrics = METRICS.filter((m) => m.kind === "line" && metricsOn[m.key]);
-    const showRight = lineMetrics.length > 0;
 
-    const leftPad = showLeft ? PAD.left : 16;
-    const rightPad = showRight ? 16 + lineMetrics.length * AXIS_GUTTER : 16;
+    const { left: leftPad, right: rightPad } = plotPads();
     const plotW = rect.width - leftPad - rightPad;
     const plotH = rect.height - PAD.top - PAD.bottom;
 
@@ -665,8 +690,7 @@
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const leftPad = metricsOn.revenue ? PAD.left : 16;
-    const rightPad = METRICS.some((m) => m.kind === "line" && metricsOn[m.key]) ? PAD.right : 16;
+    const { left: leftPad, right: rightPad } = plotPads();
     const plotW = rect.width - leftPad - rightPad;
     if (x < leftPad || x > rect.width - rightPad) return hideTooltip();
 
@@ -745,6 +769,11 @@
   // unlike a midpoint-quadratic smoother, this passes exactly through every
   // point (converted to bezier tangents from each point's neighbors), so the
   // dot markers drawn at the same points always sit right on the line.
+  //
+  // Each segment's control-point y is clamped to its endpoints' range: a
+  // bezier never leaves its control points' convex hull, so the curve can't
+  // overshoot a local extreme — without this, a steep drop into a flat run of
+  // zeros swings the spline below the $0 baseline (and past axis maxima).
   function drawSmoothLine(ctx, pts) {
     ctx.beginPath();
     if (pts.length < 2) return;
@@ -753,15 +782,18 @@
       ctx.lineTo(pts[1].x, pts[1].y);
       return;
     }
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
     for (let i = 0; i < pts.length - 1; i++) {
       const p0 = pts[i - 1] || pts[i];
       const p1 = pts[i];
       const p2 = pts[i + 1];
       const p3 = pts[i + 2] || p2;
+      const yLo = Math.min(p1.y, p2.y);
+      const yHi = Math.max(p1.y, p2.y);
       const cp1x = p1.x + (p2.x - p0.x) / 6;
-      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp1y = clamp(p1.y + (p2.y - p0.y) / 6, yLo, yHi);
       const cp2x = p2.x - (p3.x - p1.x) / 6;
-      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      const cp2y = clamp(p2.y - (p3.y - p1.y) / 6, yLo, yHi);
       ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
     }
   }

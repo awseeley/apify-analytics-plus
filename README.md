@@ -80,9 +80,10 @@ node extensions/apify-analytics-plus/build.mjs
 
 ## Notes / limitations
 
-- Only active on the **"All Actors"** view. If you filter the native page down
-  to one or more Actors, this panel hides itself — the native daily tooltip
-  already gives you that Actor's own per-day numbers.
+- Follows the native **Actor filter**: with a filter set, the chart, day
+  totals and per-Actor index are all scoped to the filtered Actor(s), and the
+  scoped breakdown is cached under its own key (shown as "(filtered)" in the
+  popup).
 - Selectors target Apify's *readable* styled-component class prefixes
   (`PaidActorProfitMarginChart`) via `[class*=]`, which tend to survive
   rebuilds even though the hash suffixes change. If Apify renames that

@@ -23,7 +23,7 @@
       return {
         path: u.pathname.replace(/^\/actor-analytics\//, ""),
         month: u.searchParams.get("month"),
-        actorIdsCount: u.searchParams.getAll("actorIds[]").length,
+        actorIds: u.searchParams.getAll("actorIds[]"),
       };
     } catch {
       return null;

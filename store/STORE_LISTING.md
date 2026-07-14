@@ -1,0 +1,116 @@
+# Chrome Web Store listing — Apify Analytics Plus
+
+Everything below is ready to paste into the [developer dashboard](https://chrome.google.com/webstore/devconsole).
+Upload package: `dist/apify-analytics-plus-chrome.zip` (rebuild with
+`node build.mjs`).
+
+> All screenshots were generated from a local mock harness with fabricated
+> data — no real account, actor names, or revenue figures appear in them.
+
+## Listing
+
+**Name:** Apify Analytics Plus
+
+**Summary (132 chars max):**
+Per-Actor daily revenue breakdown for the Apify Console — hover any day to see which Actors drove it.
+
+**Category:** Developer Tools
+
+**Language:** English
+
+**Description:**
+
+```
+See which Actors drove each day's revenue — right inside the Apify Console.
+
+The Console's Monetization insights page shows account-wide revenue per day,
+and per-Actor totals for the whole month — but never both at once. Apify
+Analytics Plus fills that gap with a richer chart, drawn in place of the
+native one:
+
+• Hover any day for that day's revenue, costs, profit, margin, runs, results
+  and success rate — plus a top-10 table of the Actors that drove it.
+• Stack the revenue bars by Actor to see composition at a glance, with
+  stable per-Actor colors across the whole month.
+• Overlay Runs and Results trend lines, each on its own axis.
+• Follows the Console's native Actor filter — filter to one Actor and every
+  number scopes to it.
+• Flip back to the original Apify chart at any time with one checkbox.
+
+How it works: the extension calls the same first-party Apify analytics API
+the Insights page itself uses, once per monetized Actor, and merges the
+results into a per-day, per-Actor index. Results are cached locally in your
+browser for 15 minutes, so revisiting the page is instant.
+
+Privacy: everything stays in your browser. The extension talks only to
+Apify's own analytics backend, using the session the Console page already
+has. Nothing is collected, stored remotely, or sent to any third party.
+
+Not affiliated with or endorsed by Apify.
+```
+
+## Images
+
+| Asset | File |
+|---|---|
+| Screenshot 1 (1280×800) | `screenshot-1-tooltip.png` — day tooltip with top Actors table |
+| Screenshot 2 (1280×800) | `screenshot-2-breakdown.png` — revenue stacked by Actor |
+| Screenshot 3 (1280×800) | `screenshot-3-multimetric.png` — runs + results overlays |
+| Screenshot 4 (1280×800) | `screenshot-4-popup.png` — popup / feature overview |
+| Small promo tile (440×280) | `promo-tile-440x280.png` |
+
+## Privacy tab
+
+**Single purpose description:**
+Adds a per-Actor daily revenue/cost/profit breakdown to the Apify Console's
+Monetization insights page.
+
+**Permission justifications:**
+
+- `storage` — caches the computed per-Actor daily breakdown locally for 15
+  minutes so revisiting the Insights page doesn't refetch, and remembers the
+  user's chart toggle preferences.
+- Host permission `https://console-backend.apify.com/*` — the extension
+  fetches the same first-party actor-analytics endpoints
+  (`actor-breakdown`, `profit-margin`, `run-statistics`) the Console page
+  itself calls, scoped per Actor, to build the per-day breakdown. This is
+  the extension's single data source.
+- Content scripts on `https://console.apify.com/*` — one script renders the
+  breakdown panel on the Monetization insights page; a second (MAIN world)
+  observes the Authorization header the Console attaches to its own
+  analytics requests so the extension can call the same first-party API as
+  the same logged-in user. The token is held in memory only, never
+  persisted, and never sent anywhere except `console-backend.apify.com`.
+
+**Remote code:** No, I am not using remote code. (All JS is packaged; no
+eval, no CDN scripts.)
+
+**Data usage:**
+- Collects: **Website content** (revenue/cost/run statistics fetched from
+  Apify's analytics API) and **Authentication information** (the Console
+  session's bearer token, held in memory only). Everything is processed and
+  cached locally; nothing leaves the browser except requests to Apify's own
+  backend.
+- Certify: data is NOT sold, NOT used for unrelated purposes, NOT used for
+  creditworthiness/lending.
+
+## Submission checklist
+
+1. `node build.mjs`
+2. Upload `dist/apify-analytics-plus-chrome.zip`
+3. Paste listing text + upload the 4 screenshots and promo tile
+4. Fill the Privacy tab from the section above
+5. Visibility: Public (or Unlisted for a soft launch)
+
+Edge (optional): same flow at the [Edge Add-ons dashboard](https://partner.microsoft.com/dashboard/microsoftedge)
+with `dist/apify-analytics-plus-edge.zip`.
+
+## Regenerating screenshots
+
+The mock harness (Console-lookalike page + fake data driving the extension's
+real `app.js`/`app.css`) is a throwaway under the Claude session scratchpad
+(`aap-harness/`); the images in this folder are the durable output. If you
+need to regenerate later, the harness is easy to rebuild: shim
+`chrome.storage` + `AAP_API` + `AAP_CACHE`, patch `ROUTE` to
+`location.pathname`, and screenshot with
+`chrome --headless=new --window-size=1280,800 --virtual-time-budget=10000`.
