@@ -488,7 +488,7 @@
   // independent scales visually aligned on one set of horizontal lines.
   const PAD = { left: 56, top: 12, bottom: 22 };
   const AXIS_GUTTER = 48; // width reserved per right-side axis column
-  const TICK_INTERVALS = 7; // 7 gridline steps above $0 — reproduces Apify's own 0/50/100/.../350 spacing
+  const TICK_TARGET = 8; // max gridline steps above $0 — Apify's own chart shows 0/50/.../400
 
   // Single source of truth for the plot's horizontal padding. drawChart and
   // onHover MUST agree on this — each active line metric adds a right-side
@@ -502,9 +502,28 @@
     };
   }
 
-  // Rounds a data max up to a "nice" axis max (1/2/5 x a power of ten) split
-  // into `intervals` even steps, e.g. 327.93 over 7 intervals -> 350 (steps
-  // of 50) — the same rounding Apify's own chart uses for its $ axis.
+  // Picks a "nice" step (1/2/5 x a power of ten) and lets the gridline COUNT
+  // vary to cover the data, e.g. 360 -> steps of 50 over 8 ticks (axis 400).
+  // This is what Apify's own chart does. Forcing a fixed tick count instead
+  // makes the step itself absorb all the rounding — 360 over a fixed 7 needs
+  // a step > 51.4, whose next nice value is 100, blowing the axis out to 700,
+  // nearly double the tallest bar.
+  function niceScale(maxValue) {
+    if (maxValue <= 0) return { max: TICK_TARGET, ticks: TICK_TARGET };
+    const rawStep = maxValue / TICK_TARGET;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const norm = rawStep / mag;
+    // Round UP to the next nice step so ticks never exceeds TICK_TARGET —
+    // ceil() below then trims the count back down to just cover the data.
+    const niceNorm = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+    const step = niceNorm * mag;
+    const ticks = Math.max(1, Math.ceil(maxValue / step));
+    return { max: step * ticks, ticks };
+  }
+
+  // Rounds a data max up to a nice axis max split into a FIXED number of
+  // intervals — used by the secondary axes, which must share the gridline
+  // count the primary axis picked (see the note above drawChart).
   function niceAxisMax(maxValue, intervals) {
     if (maxValue <= 0) return intervals;
     const rawStep = maxValue / intervals;
@@ -560,14 +579,18 @@
     const plotW = rect.width - leftPad - rightPad;
     const plotH = rect.height - PAD.top - PAD.bottom;
 
-    const leftMax = showLeft
-      ? niceAxisMax(Math.max(1, ...days.map((d) => metricValue(d, "revenue"))), TICK_INTERVALS)
-      : 1;
+    // The primary axis (Revenue when shown, else the first line metric) picks
+    // both its own max AND the shared gridline count via niceScale; every
+    // other axis rounds its max up onto that same count.
+    const dataMax = (key) => Math.max(1, ...days.map((d) => metricValue(d, key)));
+    const primaryKey = showLeft ? "revenue" : lineMetrics[0]?.key;
+    const { max: primaryMax, ticks } = niceScale(primaryKey ? dataMax(primaryKey) : 1);
+    const leftMax = showLeft ? primaryMax : 1;
     // Each line metric gets its own scale — see the note on PAD above.
     const lineMax = new Map(
-      lineMetrics.map((m) => [
+      lineMetrics.map((m, i) => [
         m.key,
-        niceAxisMax(Math.max(1, ...days.map((d) => metricValue(d, m.key))), TICK_INTERVALS),
+        !showLeft && i === 0 ? primaryMax : niceAxisMax(dataMax(m.key), ticks),
       ]),
     );
 
@@ -582,7 +605,6 @@
     // matter what size was requested. Read the page's real font stack instead.
     ctx.font = `13px ${getComputedStyle(wrapper).fontFamily || "sans-serif"}`;
     ctx.textBaseline = "middle";
-    const ticks = TICK_INTERVALS;
     for (let i = 0; i <= ticks; i++) {
       const frac = i / ticks;
       const y = PAD.top + plotH * (1 - frac);
