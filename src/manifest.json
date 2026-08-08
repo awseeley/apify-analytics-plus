@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Apify Analytics Plus",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "Adds a per-Actor daily breakdown to the Apify Console Monetization insights page — click a day to see which Actors drove it.",
   "permissions": ["storage"],
   "host_permissions": ["https://console-backend.apify.com/*"],

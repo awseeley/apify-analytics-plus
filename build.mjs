@@ -1,11 +1,14 @@
 /*
- * Assembles loadable extension packages for Chrome and Edge from src/.
+ * Assembles loadable extension packages for Chrome, Edge, and Firefox from src/.
  *
  *   node extensions/apify-analytics-plus/build.mjs
  *
- * Chrome and Edge both run Manifest V3 / Chromium extensions, so the payload is
- * identical — we emit two folders (dist/chrome, dist/edge) so each can be
- * loaded, zipped, and submitted to its respective store independently.
+ * Chrome and Edge both run Manifest V3 / Chromium extensions, so their payload
+ * is identical. Firefox runs the same MV3 source unmodified (it supports
+ * promise-style chrome.* APIs) but needs a browser_specific_settings.gecko
+ * block for AMO signing, and Firefox 128+ for MAIN-world content scripts
+ * (token-sniffer.js). We emit one folder per browser so each can be loaded,
+ * zipped, and submitted to its respective store independently.
  */
 import { cp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -19,6 +22,22 @@ const dist = join(root, "dist");
 const BROWSER_PATCHES = {
   chrome: {},
   edge: {},
+  firefox: {
+    browser_specific_settings: {
+      gecko: {
+        id: "apify-analytics-plus@apifyhub.com",
+        // MAIN-world content_scripts (token-sniffer.js) need Firefox 128+.
+        strict_min_version: "128.0",
+        // AMO rejects new submissions without this declaration. "none" =
+        // nothing is collected or transmitted to the developer or third
+        // parties — all data stays in the browser / goes only to Apify's
+        // own first-party backend.
+        data_collection_permissions: {
+          required: ["none"],
+        },
+      },
+    },
+  },
 };
 
 async function buildFor(browser) {
@@ -47,5 +66,6 @@ for (const browser of Object.keys(BROWSER_PATCHES)) {
   await buildFor(browser);
 }
 console.log("\nLoad unpacked:");
-console.log("  Chrome → chrome://extensions → Developer mode → Load unpacked → extensions/apify-analytics-plus/dist/chrome");
-console.log("  Edge   → edge://extensions  → Developer mode → Load unpacked → extensions/apify-analytics-plus/dist/edge");
+console.log("  Chrome  → chrome://extensions → Developer mode → Load unpacked → extensions/apify-analytics-plus/dist/chrome");
+console.log("  Edge    → edge://extensions  → Developer mode → Load unpacked → extensions/apify-analytics-plus/dist/edge");
+console.log("  Firefox → about:debugging → This Firefox → Load Temporary Add-on → extensions/apify-analytics-plus/dist/firefox/manifest.json");

@@ -70,13 +70,19 @@
     return results;
   }
 
+  // The backend expects a single comma-joined `actorIds` param; both the old
+  // `actorIds[]=` form and repeated `actorIds=` params are rejected with 400.
+  function joinIds(actorIds) {
+    return actorIds && actorIds.length ? actorIds.join(",") : null;
+  }
+
   self.AAP_API = {
     setToken,
     hasToken: () => !!token,
-    actorBreakdown: (month, actorIds) => req("actor-breakdown", { month, "actorIds[]": actorIds }),
-    profitMargin: (month, actorIds) => req("profit-margin", { month, "actorIds[]": actorIds }),
+    actorBreakdown: (month, actorIds) => req("actor-breakdown", { month, actorIds: joinIds(actorIds) }),
+    profitMargin: (month, actorIds) => req("profit-margin", { month, actorIds: joinIds(actorIds) }),
     runStatistics: (month, actorIds) =>
-      req("run-statistics/monthly/all-users", { month, "actorIds[]": actorIds }),
+      req("run-statistics/monthly/all-users", { month, actorIds: joinIds(actorIds) }),
     pooled,
   };
 })();

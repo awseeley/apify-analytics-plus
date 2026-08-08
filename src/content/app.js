@@ -24,7 +24,12 @@
  * against our numbers.
  */
 (function () {
-  const ROUTE = "/actors/insights/monetization";
+  // Personal accounts see /actors/insights/monetization; organization
+  // accounts get an /organization/<orgId> path prefix for the same page.
+  // Match both — the org's analytics requests carry the org context in the
+  // token the sniffer picks up, so nothing else needs to change.
+  const ROUTE_RE = /^(?:\/organization\/[^/]+)?\/actors\/insights\/monetization\/?$/;
+  const onInsightsRoute = () => ROUTE_RE.test(location.pathname);
   const OVERLAY_CLASS = "aap-overlay";
   const TOOLBAR_CLASS = "aap-toolbar-row";
   const PALETTE = ["#2dd4bf", "#60a5fa", "#f472b6", "#facc15", "#a78bfa", "#fb923c", "#34d399", "#f87171"];
@@ -53,11 +58,23 @@
     actorIds: [], // native "Actor" filter, sniffed from those same requests ([] = all)
   };
 
-  // One string identifying what should currently be rendered: month + filter.
-  // Everything that loads or lands async compares against this, so a month
-  // switch and a filter switch are handled identically.
+  // Which organization's console we're looking at ("" = personal account).
+  // Part of every scope/cache key so switching personal <-> org in the same
+  // tab can't serve one account's cached breakdown to the other.
+  function currentOrg() {
+    return (location.pathname.match(/^\/organization\/([^/]+)/) || [])[1] || "";
+  }
+
+  // One string identifying what should currently be rendered: month +
+  // account + filter. Everything that loads or lands async compares against
+  // this, so a month switch, an account switch, and a filter switch are all
+  // handled identically.
+  function buildScopeKey(month, actorIds) {
+    return `${month}|${currentOrg()}|${actorIds.join(",")}`;
+  }
+
   function scopeKey() {
-    return state.month ? `${state.month}|${state.actorIds.join(",")}` : null;
+    return state.month ? buildScopeKey(state.month, state.actorIds) : null;
   }
 
   chrome.storage.local.get(Object.values(PREF_KEYS)).then((r) => {
@@ -93,7 +110,7 @@
     const path = location.pathname;
     if (path === lastPath) return;
     lastPath = path;
-    if (path !== ROUTE) unmountOverlay();
+    if (!onInsightsRoute()) unmountOverlay();
   }, 500);
 
   // ---- DOM anchoring --------------------------------------------------------
@@ -272,7 +289,7 @@
   // learned about if we haven't already, and otherwise just redraw.
   let loadedKey = null;
   const poll = setInterval(() => {
-    if (location.pathname !== ROUTE) return;
+    if (!onInsightsRoute()) return;
     const overlay = ensureOverlay();
     if (!overlay) return;
     const key = scopeKey();
@@ -295,7 +312,7 @@
   async function refreshDayMetrics(month, actorIds) {
     if (dayMetricsFetching) return;
     dayMetricsFetching = true;
-    const key = `${month}|${actorIds.join(",")}`;
+    const key = buildScopeKey(month, actorIds);
     try {
       const [margin, runs] = await Promise.all([
         AAP_API.profitMargin(month, actorIds),
@@ -324,7 +341,8 @@
   async function loadAndRender(month, actorIds) {
     const overlay = ensureOverlay();
     if (!overlay) return;
-    const scope = actorIds.join(",");
+    // "" for the personal account keeps the historical un-suffixed cache key.
+    const scope = (currentOrg() ? currentOrg() + "|" : "") + actorIds.join(",");
 
     const cached = await AAP_CACHE.get(month, scope);
     let daily = cached?.daily || null;
@@ -378,7 +396,18 @@
       colorByActorId = buildColorMap(daily);
       actorCount = paidActors.length;
       indexedAt = Date.now();
-      await AAP_CACHE.set(month, scope, { daily, actorCount, dayMetrics });
+
+      // A handful of per-Actor fetches can transiently fail (a network blip,
+      // the auth token racing readiness right after page load — see
+      // pooled()'s per-item catch). Caching that partial result would lock in
+      // an undercounted breakdown for the full 15-minute TTL, silently, since
+      // indexing:false looks identical to a clean run. Only cache complete
+      // passes; a partial one still renders (better than nothing) but the
+      // next page load retries instead of serving stale wrong data.
+      const failedCount = perActor.filter((e) => e === null).length;
+      if (failedCount === 0) {
+        await AAP_CACHE.set(month, scope, { daily, actorCount, dayMetrics });
+      }
       setData({ month, daily, actorCount, indexedAt, indexing: false, dayMetrics, progress: null });
     } catch (err) {
       if (myRun !== indexRun) return;
@@ -575,10 +604,6 @@
     const showLeft = metricsOn.revenue;
     const lineMetrics = METRICS.filter((m) => m.kind === "line" && metricsOn[m.key]);
 
-    const { left: leftPad, right: rightPad } = plotPads();
-    const plotW = rect.width - leftPad - rightPad;
-    const plotH = rect.height - PAD.top - PAD.bottom;
-
     // The primary axis (Revenue when shown, else the first line metric) picks
     // both its own max AND the shared gridline count via niceScale; every
     // other axis rounds its max up onto that same count.
@@ -594,17 +619,36 @@
       ]),
     );
 
+    // Canvas 2D's `font` has no "inherit" keyword (unlike CSS) — an invalid
+    // value here is silently dropped, leaving the browser's ~10px default,
+    // which is why this always rendered smaller than Apify's own chart no
+    // matter what size was requested. Read the page's real font stack instead.
+    // Set before the measureText calls below, which depend on it.
+    ctx.font = `13px ${getComputedStyle(wrapper).fontFamily || "sans-serif"}`;
+    ctx.textBaseline = "middle";
+
+    // Size the left gutter to the widest y-axis label instead of a fixed
+    // width — "$400.00" needs more than the old fixed gutter allowed, which
+    // clipped the leading "$" off the canvas edge.
+    let leftPad = 16;
+    if (showLeft) {
+      let w = 0;
+      for (let i = 0; i <= ticks; i++) {
+        w = Math.max(w, ctx.measureText(AAPF.money(leftMax * (i / ticks))).width);
+      }
+      leftPad = Math.ceil(w) + 16; // 8px to the plot edge + 8px to the canvas edge
+    }
+    const rightPad = 16 + lineMetrics.length * AXIS_GUTTER;
+    // The hover handler must map cursor x with the same pads this draw used.
+    canvas.__aapPads = { left: leftPad, right: rightPad };
+
+    const plotW = rect.width - leftPad - rightPad;
+    const plotH = rect.height - PAD.top - PAD.bottom;
     const slot = plotW / days.length;
     const barW = Math.max(4, slot * 0.6);
 
     // gridlines, shared across every axis (see comment above)
     ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    // Canvas 2D's `font` has no "inherit" keyword (unlike CSS) — an invalid
-    // value here is silently dropped, leaving the browser's ~10px default,
-    // which is why this always rendered smaller than Apify's own chart no
-    // matter what size was requested. Read the page's real font stack instead.
-    ctx.font = `13px ${getComputedStyle(wrapper).fontFamily || "sans-serif"}`;
-    ctx.textBaseline = "middle";
     for (let i = 0; i <= ticks; i++) {
       const frac = i / ticks;
       const y = PAD.top + plotH * (1 - frac);
@@ -625,12 +669,18 @@
       });
     }
 
-    // x-axis labels (skip some if crowded)
-    const labelEvery = Math.max(1, Math.ceil((days.length * 34) / plotW));
+    // x-axis labels: thin to a clean day step (every 1/2/4/7/14 days) like
+    // Apify's own chart, based on the measured label width. The old
+    // heuristic assumed ~34px per label, which under-measures "Jul 27"-style
+    // labels — a month view labeled every single day and the labels ran into
+    // each other. The forced last-day label is gone for the same reason: it
+    // collided with the preceding stepped label.
+    const maxLabelW = Math.max(...days.map((d) => ctx.measureText(AAPF.shortDate(d)).width));
+    const labelEvery = [1, 2, 4, 7, 14].find((s) => slot * s >= maxLabelW + 24) ?? days.length;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     days.forEach((day, i) => {
-      if (i % labelEvery === 0 || i === days.length - 1) {
+      if (i % labelEvery === 0) {
         const x = leftPad + i * slot + slot / 2;
         ctx.fillStyle = AXIS_LABEL_COLOR;
         ctx.fillText(AAPF.shortDate(day), x, rect.height - PAD.bottom + 6);
@@ -712,7 +762,9 @@
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const { left: leftPad, right: rightPad } = plotPads();
+    // Use the pads the last draw actually used (the left gutter is sized to
+    // the measured y-labels there); plotPads() is only a pre-first-draw fallback.
+    const { left: leftPad, right: rightPad } = canvas.__aapPads || plotPads();
     const plotW = rect.width - leftPad - rightPad;
     if (x < leftPad || x > rect.width - rightPad) return hideTooltip();
 

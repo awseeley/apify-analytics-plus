@@ -105,6 +105,16 @@ eval, no CDN scripts.)
 Edge (optional): same flow at the [Edge Add-ons dashboard](https://partner.microsoft.com/dashboard/microsoftedge)
 with `dist/apify-analytics-plus-edge.zip`.
 
+Firefox (optional): submit `dist/apify-analytics-plus-firefox.zip` at the
+[AMO Developer Hub](https://addons.mozilla.org/developers/) ("Submit a New
+Add-on" → On this site). The manifest already carries the required
+`browser_specific_settings.gecko` block (id
+`apify-analytics-plus@apifyhub.com`, min Firefox 128 — needed for the
+MAIN-world token sniffer). AMO asks for source code only if the package is
+minified — ours isn't, so plain submission is fine. For local testing use
+about:debugging → This Firefox → Load Temporary Add-on (resets on restart;
+permanent installs must be AMO-signed).
+
 ## Regenerating screenshots
 
 The mock harness (Console-lookalike page + fake data driving the extension's

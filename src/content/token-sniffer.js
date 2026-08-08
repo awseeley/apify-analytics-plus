@@ -20,10 +20,15 @@
       const u = new URL(url, location.origin);
       if (!u.hostname.endsWith("console-backend.apify.com")) return null;
       if (!u.pathname.includes("/actor-analytics/")) return null;
+      // The console sends the native Actor filter as one comma-joined
+      // `actorIds` param (it used to be repeated `actorIds[]=` params —
+      // still read as a fallback for older console builds).
+      const joined = u.searchParams.get("actorIds") || "";
+      const actorIds = joined ? joined.split(",").filter(Boolean) : u.searchParams.getAll("actorIds[]");
       return {
         path: u.pathname.replace(/^\/actor-analytics\//, ""),
         month: u.searchParams.get("month"),
-        actorIds: u.searchParams.getAll("actorIds[]"),
+        actorIds,
       };
     } catch {
       return null;
