@@ -45,6 +45,29 @@ body {
   cursor: pointer;
 }
 .row button:hover { background: #1d4ed8; }
+.promo { border-color: rgba(255, 140, 42, 0.45); }
+.promo .card-title { color: #ff8c2a; }
+.promo-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #d3d6e0;
+}
+.promo-list li::marker { color: #ff8c2a; }
+.promo-cta {
+  display: block;
+  margin-top: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  color: #fff;
+  background: #ff6b00;
+  border-radius: 6px;
+}
+.promo-cta:hover { background: #e86000; }
 .ft { padding: 10px 14px; text-align: center; }
 .ft a { color: #2dd4bf; font-size: 12px; text-decoration: none; }
 .ft a:hover { text-decoration: underline; }
