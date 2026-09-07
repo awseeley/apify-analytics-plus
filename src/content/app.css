@@ -62,6 +62,11 @@
 .aap-tooltip {
   position: fixed;
   z-index: 9999;
+  /* Off by default — this is just a hover preview that follows the mouse,
+     and a click target under the cursor would only get in its own way.
+     app.js flips this to auto (via .aap-tt-pinned) once the tooltip is
+     pinned in place by clicking a bar, which is when the sort headers and
+     close button need to actually receive clicks. */
   pointer-events: none;
   background: #16181d;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -71,6 +76,37 @@
   color: #e5e7eb;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   min-width: 200px;
+}
+
+.aap-tooltip.aap-tt-pinned {
+  pointer-events: auto;
+  border-color: rgba(45, 212, 191, 0.5);
+}
+
+.aap-tt-pin-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #9ca3af;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.aap-tt-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #9ca3af;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.aap-tt-close:hover {
+  color: #e5e7eb;
 }
 
 .aap-tt-header {
@@ -144,6 +180,27 @@
   color: #6b7280;
   text-align: right;
   padding-left: 12px;
+  user-select: none;
+}
+
+/* Only a pinned tooltip has pointer-events, so only style the headers as
+   clickable there — on the plain hover preview the cursor can't reach them
+   anyway, and a pointer cursor would falsely promise a click will work. */
+.aap-tt-pinned .aap-tt-table th {
+  cursor: pointer;
+}
+
+.aap-tt-pinned .aap-tt-table th:hover {
+  color: #e5e7eb;
+}
+
+.aap-tt-table th.aap-tt-sorted {
+  color: #e5e7eb;
+}
+
+.aap-tt-sort-arrow {
+  font-size: 8px;
+  margin-left: 2px;
 }
 
 .aap-tt-table td:first-child,

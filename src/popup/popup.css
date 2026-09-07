@@ -15,6 +15,34 @@ body {
 }
 .hd .name { font-weight: 650; font-size: 14px; }
 .hd .logo { font-size: 16px; }
+.icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 4px;
+  color: #d3d6e0;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.icon-button:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.back-button {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 10px 10px 0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: #8c93a8;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.back-button:hover { color: #f3f4fa; background: rgba(255, 255, 255, 0.08); }
 .card {
   margin: 10px;
   padding: 12px;
@@ -45,7 +73,31 @@ body {
   cursor: pointer;
 }
 .row button:hover { background: #1d4ed8; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #d3d6e0; }
+.field input[type="number"] {
+  width: 70px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #f3f4fa;
+  background: #14161a;
+  border: 1px solid #31384d;
+  border-radius: 6px;
+}
+.field-hint { margin-top: 8px; font-size: 11px; color: #8c93a8; }
+.link-button {
+  padding: 0;
+  margin-left: 4px;
+  font: inherit;
+  font-size: 11px;
+  color: #2dd4bf;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.link-button:hover { color: #5eead4; }
 .promo { border-color: rgba(255, 140, 42, 0.45); }
+.promo-hidden { display: none; }
 .promo .card-title { color: #ff8c2a; }
 .promo-list {
   margin: 8px 0 0;

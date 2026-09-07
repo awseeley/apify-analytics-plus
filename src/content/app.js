@@ -6,7 +6,8 @@
  * axis; Runs/Results draw line series against a secondary right axis) and a
  * "Breakdown by actor" checkbox that stacks the Revenue bars by Actor.
  * Hovering any day shows a tooltip with that day's full stats plus the top
- * 10 Actors by whichever metric is active. We draw our own chart (rather
+ * Actors (10 by default, configurable from the toolbar popup) by whichever
+ * metric is active. We draw our own chart (rather
  * than reaching into Apify's) because it's a black-box Chart.js canvas with
  * no exposed instance to restyle or hook into.
  *
@@ -35,6 +36,10 @@
   const PALETTE = ["#2dd4bf", "#60a5fa", "#f472b6", "#facc15", "#a78bfa", "#fb923c", "#34d399", "#f87171"];
   const OTHER_COLOR = "#6b7280";
   const TOP_N = PALETTE.length;
+  // How many Actors the click-to-pin tooltip table lists, ranked by the
+  // active headline metric. Configurable from the extension's toolbar popup
+  // (Settings section) — this is just the fallback until that pref loads.
+  const DEFAULT_TOOLTIP_ACTOR_COUNT = 10;
   const METRICS = [
     { key: "revenue", label: "Revenue", color: "#12966f", kind: "bar", axis: "left" }, // matches Apify's own chart bar color
     { key: "runs", label: "Runs", color: "#22d3ee", kind: "line", axis: "right" },
@@ -46,12 +51,21 @@
     composition: "aap.compositionOn",
     metricsOn: "aap.metricsOn",
     showNative: "aap.showNativeOn",
+    tooltipActorCount: "aap.tooltipActorCount",
   };
 
   // How often to re-fetch the cheap account-wide day totals while a month
   // stays loaded, so a long-open tab doesn't show numbers from whenever it
   // was first opened (recent days keep settling on Apify's side too).
   const DAY_METRICS_REFRESH_MS = 60_000;
+
+  // How often a still-open tab re-runs the full per-Actor index. Without
+  // this, the breakdown was indexed exactly once per page load, so a tab
+  // opened before today's first paid run showed "No paid Actor activity this
+  // day" for today forever (while the account-wide totals, refreshed every
+  // minute, plainly showed revenue). Matches the cache TTL — re-running
+  // sooner would just be served the same fresh cache and no-op.
+  const BREAKDOWN_REFRESH_MS = 15 * 60 * 1000;
 
   const state = {
     month: null, // "2026-07-01", from the page's own requests
@@ -81,8 +95,19 @@
     compositionOn = !!r[PREF_KEYS.composition];
     if (r[PREF_KEYS.metricsOn]) metricsOn = { ...metricsOn, ...r[PREF_KEYS.metricsOn] };
     showNativeOn = !!r[PREF_KEYS.showNative];
+    if (r[PREF_KEYS.tooltipActorCount] > 0) tooltipActorCount = r[PREF_KEYS.tooltipActorCount];
     syncToolbar();
     drawChart();
+  });
+
+  // The tooltip actor count is set from the toolbar popup (a separate
+  // context from this content script), not from anything in this page, so
+  // pick up a change made there live rather than requiring a reload.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes[PREF_KEYS.tooltipActorCount]) return;
+    const next = changes[PREF_KEYS.tooltipActorCount].newValue;
+    tooltipActorCount = next > 0 ? next : DEFAULT_TOOLTIP_ACTOR_COUNT;
+    renderTooltip();
   });
 
   // ---- token bridge -------------------------------------------------------
@@ -136,7 +161,21 @@
     // When "Show original Apify chart" is on, we flip this the other way:
     // the native canvas is shown and our own overlay is display:none'd.
     const nativeCanvas = wrapper.querySelector("canvas:not(.aap-chart)");
-    if (nativeCanvas) nativeCanvas.style.visibility = showNativeOn ? "" : "hidden";
+    if (nativeCanvas) {
+      const vis = showNativeOn ? "" : "hidden";
+      if (nativeCanvas.style.visibility !== vis) {
+        nativeCanvas.style.visibility = vis;
+        // If the pointer was over the native chart before we hid it (easy to
+        // do while the page is still loading), Chart.js has a tooltip painted
+        // into the canvas bitmap and only clears it on another pointer event
+        // — which a hidden canvas never receives. That stale tooltip then
+        // re-surfaces whenever the canvas is shown again (the "Show original
+        // Apify chart" toggle, or the brief window after a Console re-render
+        // before this poll re-hides it). Tell Chart.js the pointer left so it
+        // repaints without the tooltip.
+        if (vis === "hidden") nativeCanvas.dispatchEvent(new MouseEvent("mouseout"));
+      }
+    }
     if (getComputedStyle(wrapper).position === "static") wrapper.style.position = "relative";
 
     ensureToolbar(wrapper);
@@ -153,10 +192,18 @@
       const tooltip = document.createElement("div");
       tooltip.className = "aap-tooltip";
       tooltip.style.display = "none";
+      tooltip.addEventListener("click", onTooltipClick);
       document.body.appendChild(tooltip); // fixed-position, outside clipped ancestors
 
+      // Hover shows a live preview that follows the cursor (as before) and
+      // is not interactive — pointer-events is off by default. Clicking a
+      // day's bar "pins" the tooltip: it stops following the mouse and
+      // becomes clickable (see PIN below) so the sort headers actually work.
       canvas.addEventListener("mousemove", onHover);
-      canvas.addEventListener("mouseleave", hideTooltip);
+      canvas.addEventListener("mouseleave", () => {
+        if (pinnedDay == null) hideTooltip();
+      });
+      canvas.addEventListener("click", onChartClick);
 
       wrapper.appendChild(overlay);
     }
@@ -279,6 +326,12 @@
     const nativeCanvas = wrapper?.querySelector("canvas:not(.aap-chart)");
     if (nativeCanvas) nativeCanvas.style.visibility = "";
     document.querySelector(".aap-tooltip")?.remove();
+    // The tooltip element is gone, but the pin/day state is separate JS
+    // state — without resetting it here, navigating back to the Insights
+    // page later would find pinnedDay still set and onHover would keep
+    // silently no-op'ing forever (it defers entirely to a pinned tooltip).
+    pinnedDay = null;
+    tooltipDay = null;
   }
 
   // Single trigger point, polled: the anchor may not exist yet on first
@@ -300,6 +353,14 @@
     }
     if (key && Date.now() - dayMetricsFetchedAt > DAY_METRICS_REFRESH_MS) {
       refreshDayMetrics(state.month, state.actorIds);
+    }
+    // Periodically re-run the whole load (cache check + re-index once the
+    // cache has gone stale) so a long-open tab's per-Actor breakdown keeps up
+    // with today — see BREAKDOWN_REFRESH_MS. loadAndRender stamps
+    // breakdownRefreshedAt itself, which also covers the initial load.
+    if (key && lastData && !lastData.indexing && Date.now() - breakdownRefreshedAt > BREAKDOWN_REFRESH_MS) {
+      loadAndRender(state.month, state.actorIds).catch(() => {});
+      return;
     }
     if (lastData) drawChart();
   }, 400);
@@ -334,13 +395,28 @@
   let compositionOn = false;
   let metricsOn = { revenue: true, runs: false, results: false };
   let showNativeOn = false;
+  let tooltipActorCount = DEFAULT_TOOLTIP_ACTOR_COUNT;
   let colorByActorId = new Map();
   let dayMetricsFetchedAt = 0;
   let dayMetricsFetching = false;
+  let breakdownRefreshedAt = 0;
+
+  // True when some day has revenue in the account-wide totals but no rows in
+  // the per-Actor breakdown — the signature of a breakdown indexed before
+  // that day's first paid activity (typically: a cache written earlier today,
+  // or right after the UTC day rolled over). Any day with real revenue must
+  // have at least one earning Actor, so this can't false-positive on a
+  // legitimately quiet day.
+  function breakdownMissingRevenueDay(daily, dayMetrics) {
+    return Object.entries(dayMetrics || {}).some(
+      ([day, m]) => m.revenue > 0 && !daily?.[day]?.length,
+    );
+  }
 
   async function loadAndRender(month, actorIds) {
     const overlay = ensureOverlay();
     if (!overlay) return;
+    breakdownRefreshedAt = Date.now(); // pace the poll's periodic re-run
     // "" for the personal account keeps the historical un-suffixed cache key.
     const scope = (currentOrg() ? currentOrg() + "|" : "") + actorIds.join(",");
 
@@ -360,6 +436,12 @@
     // two never race.
     await refreshDayMetrics(month, actorIds);
     let dayMetrics = lastData?.dayMetrics || cached?.dayMetrics || null;
+
+    // A cache can be fresh by TTL yet already wrong: indexed before today's
+    // first paid run, it has no per-Actor rows for a day the just-fetched
+    // account totals show revenue on, and the tooltip would claim "No paid
+    // Actor activity" for a day that plainly earned. Re-index despite the TTL.
+    if (!indexing && breakdownMissingRevenueDay(daily, dayMetrics)) indexing = true;
 
     if (!indexing) return;
 
@@ -755,37 +837,137 @@
   }
 
   // ---- hover tooltip --------------------------------------------------------
-  function onHover(e) {
-    const canvas = e.currentTarget;
+  // Maps a clientX on the canvas to the day it falls in, or null outside the
+  // plot area. Shared by hover (preview) and click (pin) so they agree on
+  // which day the cursor is over.
+  function dayAtClientX(canvas, clientX) {
     const days = canvas.__aapDays || [];
-    if (!days.length || !lastData) return hideTooltip();
-
+    if (!days.length) return null;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    const x = clientX - rect.left;
     // Use the pads the last draw actually used (the left gutter is sized to
     // the measured y-labels there); plotPads() is only a pre-first-draw fallback.
     const { left: leftPad, right: rightPad } = canvas.__aapPads || plotPads();
     const plotW = rect.width - leftPad - rightPad;
-    if (x < leftPad || x > rect.width - rightPad) return hideTooltip();
-
+    if (x < leftPad || x > rect.width - rightPad) return null;
     const slot = plotW / days.length;
     const idx = Math.min(days.length - 1, Math.max(0, Math.floor((x - leftPad) / slot)));
-    const day = days[idx];
+    return days[idx];
+  }
+
+  function onHover(e) {
+    if (pinnedDay != null) return; // pinned tooltip ignores hover entirely until unpinned
+    if (!lastData) return hideTooltip();
+    const day = dayAtClientX(e.currentTarget, e.clientX);
+    if (day == null) return hideTooltip();
     showTooltip(e.clientX, e.clientY, day);
   }
 
-  function showTooltip(clientX, clientY, day) {
+  // Clicking a bar pins the tooltip in place: it stops following the mouse
+  // and gains pointer-events (see .aap-tt-pinned in app.css) so the sort
+  // headers are actually clickable — a pure hover tooltip can't host a click
+  // target, since leaving the canvas to reach it just hides it. Clicking the
+  // same day again (or the close button, or Escape, or clicking outside
+  // both the chart and the tooltip — see the document-level listeners below)
+  // unpins and hands control back to hover.
+  function onChartClick(e) {
+    if (!lastData) return;
+    const day = dayAtClientX(e.currentTarget, e.clientX);
+    if (day == null) return;
+    if (pinnedDay === day) {
+      pinnedDay = null;
+      showTooltip(e.clientX, e.clientY, day); // resume as a normal hover preview
+      return;
+    }
+    pinnedDay = day;
+    tooltipDay = day;
+    tooltipSort = { key: primaryMetric(), dir: "desc" };
+    renderTooltip();
+    positionTooltip(e.clientX, e.clientY);
+  }
+
+  document.addEventListener("click", (e) => {
+    if (pinnedDay == null) return;
     const tooltip = document.querySelector(".aap-tooltip");
-    if (!tooltip) return;
+    const canvas = document.querySelector(".aap-chart");
+    if (tooltip?.contains(e.target) || canvas?.contains(e.target)) return; // handled above
+    hideTooltip();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && pinnedDay != null) hideTooltip();
+  });
+
+  // Columns available in the per-day actor table, in display order. `sort`
+  // is the row field each header sorts by; "name" compares alphabetically,
+  // everything else numerically.
+  const TOOLTIP_COLUMNS = [
+    { sort: "name", label: "Actor" },
+    { sort: "revenue", label: "Revenue", fmt: (r) => AAPF.money(r.revenue || 0) },
+    { sort: "cost", label: "Cost", fmt: (r) => AAPF.money(r.cost || 0) },
+    { sort: "runs", label: "Runs", fmt: (r) => AAPF.compact(r.runs || 0) },
+    { sort: "results", label: "Results", fmt: (r) => AAPF.compact(r.results || 0) },
+  ];
+
+  // Which day's table is currently shown, and how its rows are ordered.
+  // Reset to "by the active headline metric, descending" whenever the
+  // hovered/pinned day changes; a header click overrides it for that day
+  // only, so moving to a new day always starts from the metric-relevant
+  // view again.
+  let pinnedDay = null; // non-null while the tooltip is pinned (see onChartClick)
+  let tooltipDay = null;
+  let tooltipSort = { key: "revenue", dir: "desc" };
+
+  function showTooltip(clientX, clientY, day) {
+    if (day !== tooltipDay) {
+      tooltipDay = day;
+      tooltipSort = { key: primaryMetric(), dir: "desc" };
+    }
+    renderTooltip();
+    positionTooltip(clientX, clientY);
+  }
+
+  function onTooltipClick(e) {
+    // Any click that reaches the tooltip is fully handled right here — never
+    // let it bubble to the document "click outside to unpin" listener below.
+    // That matters beyond tidiness: sorting rebuilds the table via innerHTML,
+    // which detaches the clicked <th>, so by the time a bubbled event reached
+    // the document listener, tooltip.contains(e.target) would check a node
+    // no longer in the tree and read as "clicked outside" — closing the
+    // tooltip right after every sort click.
+    e.stopPropagation();
+    if (e.target.closest(".aap-tt-close")) return hideTooltip();
+    const th = e.target.closest("th[data-sort]");
+    if (!th || tooltipDay == null) return;
+    const key = th.dataset.sort;
+    tooltipSort =
+      tooltipSort.key === key
+        ? { key, dir: tooltipSort.dir === "desc" ? "asc" : "desc" }
+        : { key, dir: key === "name" ? "asc" : "desc" }; // names default A→Z, numbers default high→low
+    renderTooltip();
+  }
+
+  function renderTooltip() {
+    const tooltip = document.querySelector(".aap-tooltip");
+    const day = tooltipDay;
+    if (!tooltip || day == null || !lastData) return;
+
+    const pinned = pinnedDay === day;
+    tooltip.classList.toggle("aap-tt-pinned", pinned);
 
     const dm = (lastData.dayMetrics || {})[day];
     const metric = primaryMetric();
     const metricDef = METRICS.find((m) => m.key === metric);
     const headlineValue = metric === "revenue" ? AAPF.money(dm?.revenue ?? 0) : AAPF.compact(dm?.[metric] ?? 0);
 
+    // Only a pinned tooltip has pointer-events, so this affordance would be
+    // misleading (and inert) on a plain hover preview.
+    let html = pinned
+      ? `<div class="aap-tt-pin-bar">📌 Pinned — click the bar again or press Esc to close<button type="button" class="aap-tt-close" aria-label="Close">×</button></div>`
+      : "";
+
     // Headline metric + value up top (matching Apify's own tooltip), date
     // just below it, then our fuller day/actor breakdown underneath.
-    let html = `<div class="aap-tt-header">`;
+    html += `<div class="aap-tt-header">`;
     html += `<span class="aap-tt-dot" style="background:${metricDef.color}"></span>`;
     html += `<span class="aap-tt-header-label">${metricDef.label}</span>`;
     html += `<span class="aap-tt-header-value">${headlineValue}</span>`;
@@ -801,20 +983,35 @@
     html += `<span>Success <b>${dm?.successRate != null ? AAPF.pct(dm.successRate) : "–"}</b></span>`;
     html += "</div>";
 
-    const rows = [...(lastData.daily?.[day] || [])].sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
-    const top10 = rows.slice(0, 10);
+    // The Actor count is always picked by the active headline metric —
+    // clicking a column header only reorders that same set, it never swaps
+    // which Actors are shown.
+    const ranked = [...(lastData.daily?.[day] || [])].sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
+    const topActors = ranked.slice(0, tooltipActorCount);
 
-    if (top10.length) {
-      html += `<div class="aap-tt-subtitle">Top Actors by ${METRICS.find((m) => m.key === metric).label}</div>`;
-      html +=
-        '<table class="aap-tt-table"><thead><tr><th></th><th>Revenue</th><th>Runs</th><th>Results</th></tr></thead><tbody>';
-      for (const row of top10) {
+    if (topActors.length) {
+      const sortDir = tooltipSort.dir === "asc" ? 1 : -1;
+      const sorted = [...topActors].sort((a, b) => {
+        if (tooltipSort.key === "name") return sortDir * a.name.localeCompare(b.name);
+        return sortDir * ((a[tooltipSort.key] || 0) - (b[tooltipSort.key] || 0));
+      });
+
+      html += `<div class="aap-tt-subtitle">Top ${tooltipActorCount} Actors by ${METRICS.find((m) => m.key === metric).label}</div>`;
+      html += '<table class="aap-tt-table"><thead><tr>';
+      for (const col of TOOLTIP_COLUMNS) {
+        const isSortCol = tooltipSort.key === col.sort;
+        const arrow = isSortCol ? `<span class="aap-tt-sort-arrow">${tooltipSort.dir === "asc" ? "▲" : "▼"}</span>` : "";
+        html += `<th data-sort="${col.sort}" class="${isSortCol ? "aap-tt-sorted" : ""}">${col.label}${arrow}</th>`;
+      }
+      // pinned/unpinned only changes interactivity via CSS (.aap-tt-pinned),
+      // not this markup — pointer-events:none on the unpinned tooltip makes
+      // the (identical) headers inert without a second code path.
+      html += "</tr></thead><tbody>";
+      for (const row of sorted) {
         const color = colorByActorId.get(row.actorId) || OTHER_COLOR;
-        html +=
-          `<tr><td><span class="aap-tt-dot" style="background:${color}"></span>${escapeHtml(row.name)}</td>` +
-          `<td>${AAPF.money(row.revenue || 0)}</td>` +
-          `<td>${AAPF.compact(row.runs || 0)}</td>` +
-          `<td>${AAPF.compact(row.results || 0)}</td></tr>`;
+        html += `<tr><td><span class="aap-tt-dot" style="background:${color}"></span>${escapeHtml(row.name)}</td>`;
+        for (const col of TOOLTIP_COLUMNS.slice(1)) html += `<td>${col.fmt(row)}</td>`;
+        html += "</tr>";
       }
       html += "</tbody></table>";
     } else if (lastData.indexing) {
@@ -824,7 +1021,11 @@
     }
     tooltip.innerHTML = html;
     tooltip.style.display = "block";
+  }
 
+  function positionTooltip(clientX, clientY) {
+    const tooltip = document.querySelector(".aap-tooltip");
+    if (!tooltip) return;
     const ttRect = tooltip.getBoundingClientRect();
     let left = clientX + 14;
     let top = clientY + 14;
@@ -836,7 +1037,12 @@
 
   function hideTooltip() {
     const tooltip = document.querySelector(".aap-tooltip");
-    if (tooltip) tooltip.style.display = "none";
+    if (tooltip) {
+      tooltip.style.display = "none";
+      tooltip.classList.remove("aap-tt-pinned");
+    }
+    tooltipDay = null;
+    pinnedDay = null; // any path that closes the tooltip also releases the pin
   }
 
   // Traces `pts` as a smooth Catmull-Rom spline converted to cubic beziers —
