@@ -31,5 +31,29 @@
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
   }
 
-  self.AAPF = { money, pct, compact, dayOfMonth, shortDate };
+  // "2026-07-08" -> "Jul 8, 2026" (tooltips in a multi-month range)
+  function longDate(dateStr) {
+    const d = new Date(dateStr + "T00:00:00Z");
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  }
+
+  // "2026-07-01" / "2026-07" -> "Jul 2026"
+  function monthLabel(month) {
+    const d = new Date(String(month).slice(0, 7) + "-01T00:00:00Z");
+    return d.toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
+  }
+
+  // "2026-07-01" -> "July 2026" (matches the Console's own month picker)
+  function monthLabelLong(month) {
+    const d = new Date(String(month).slice(0, 7) + "-01T00:00:00Z");
+    return d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+  }
+
+  // "Aug 21 – Sep 19, 2026" / "Dec 1, 2025 – Sep 19, 2026"
+  function rangeLabel(from, to) {
+    if (from.slice(0, 4) === to.slice(0, 4)) return `${shortDate(from)} – ${longDate(to)}`;
+    return `${longDate(from)} – ${longDate(to)}`;
+  }
+
+  self.AAPF = { money, pct, compact, dayOfMonth, shortDate, longDate, monthLabel, monthLabelLong, rangeLabel };
 })();

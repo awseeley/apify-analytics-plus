@@ -32,7 +32,7 @@
   const ROUTE_RE = /^(?:\/organization\/[^/]+)?\/actors\/insights\/monetization\/?$/;
   const onInsightsRoute = () => ROUTE_RE.test(location.pathname);
   const OVERLAY_CLASS = "aap-overlay";
-  const TOOLBAR_CLASS = "aap-toolbar-row";
+  const TOOLBAR_CLASS = "aap-toolbar";
   const PALETTE = ["#2dd4bf", "#60a5fa", "#f472b6", "#facc15", "#a78bfa", "#fb923c", "#34d399", "#f87171"];
   const OTHER_COLOR = "#6b7280";
   const TOP_N = PALETTE.length;
@@ -47,11 +47,56 @@
   ];
   const AXIS_LABEL_COLOR = "#666666"; // matches Apify's own chart axis labels
 
+  // The Console's Costs / Revenue / Profit / Margin KPI tabs above the chart
+  // pick what its own chart plots. We follow them: Costs, Revenue and Profit
+  // become our bar metric (with the per-Actor breakdown), while Margin is a
+  // ratio that can't be stacked by Actor, so it hands the chart back to
+  // Apify's own line. Detected from the tab nav's `_active` class on every
+  // poll tick — the tabs are React links that don't change the URL.
+  const BAR_METRICS = {
+    revenue: { label: "Revenue", color: "#12966f" },
+    cost: { label: "Costs", color: "#e5484d" },
+    profit: { label: "Profit", color: "#6b9fff" },
+  };
+  let headline = "revenue"; // "revenue" | "cost" | "profit" | "margin"
+
+  function nativeHeadline() {
+    const active = document.querySelector('[class*="StyledLargeTabNav"] a[role="tab"]._active');
+    const txt = (active?.textContent || "").trim().toLowerCase();
+    if (txt.startsWith("cost")) return "cost";
+    if (txt.startsWith("profit")) return "profit";
+    if (txt.startsWith("margin")) return "margin";
+    return "revenue";
+  }
+
+  // The bar metric currently plotted on the left axis (never "margin" — in
+  // Margin mode the native chart shows instead and this is unused).
+  function barMetric() {
+    const key = headline === "margin" ? "revenue" : headline;
+    return { key, kind: "bar", axis: "left", ...BAR_METRICS[key] };
+  }
+
+  // Metric definition by key, covering the dynamic bar metric as well as the
+  // fixed line metrics in METRICS.
+  function metricDef(key) {
+    if (BAR_METRICS[key]) return { key, kind: "bar", axis: "left", ...BAR_METRICS[key] };
+    return METRICS.find((m) => m.key === key);
+  }
+
+  // While Margin is selected the native chart is the one on screen, whatever
+  // the user's own "Show original Apify chart" preference says.
+  function nativeChartWanted() {
+    return showNativeOn || headline === "margin";
+  }
+
   const PREF_KEYS = {
     composition: "aap.compositionOn",
     metricsOn: "aap.metricsOn",
     showNative: "aap.showNativeOn",
     tooltipActorCount: "aap.tooltipActorCount",
+    rangeMode: "aap.rangeMode",
+    customRange: "aap.customRange",
+    highlights: "aap.highlightsOn", // false hides the highlights panel; absent = shown
   };
 
   // How often to re-fetch the cheap account-wide day totals while a month
@@ -66,10 +111,75 @@
   // minute, plainly showed revenue). Matches the cache TTL — re-running
   // sooner would just be served the same fresh cache and no-op.
   const BREAKDOWN_REFRESH_MS = 15 * 60 * 1000;
+  // After a failed index (network blip, token not ready yet) retry much
+  // sooner than the regular 15-minute cadence.
+  const ERROR_RETRY_MS = 30_000;
+
+  // Only the current month keeps moving on Apify's side (today's runs, and
+  // refunds/unpaid invoices until the payout). Past months are final, so
+  // they're fetched once per (long) cache TTL and never refreshed while the
+  // tab sits open. month is "YYYY-MM-01" (the page's param) or "YYYY-MM".
+  function isCurrentMonth(month) {
+    return !!month && String(month).slice(0, 7) === new Date().toISOString().slice(0, 7);
+  }
+
+  // ---- date range ------------------------------------------------------------
+  // Apify's day buckets are UTC dates ("2026-09-19"), so every range here is
+  // computed in UTC too — "today" is the UTC day, matching isCurrentMonth.
+  const todayUtc = () => new Date().toISOString().slice(0, 10);
+  const monthOf = (day) => String(day).slice(0, 7) + "-01";
+  function addDays(day, n) {
+    const d = new Date(day + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  function addMonths(month, n) {
+    const d = new Date(monthOf(month) + "T00:00:00Z");
+    d.setUTCMonth(d.getUTCMonth() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  const monthEnd = (month) => addDays(addMonths(month, 1), -1);
+  // Every "YYYY-MM-01" touched by [from, to], newest first — the order the
+  // loader works in, so the most recent (most interesting) days fill first.
+  function monthsBetween(from, to) {
+    const out = [];
+    for (let m = monthOf(to); m >= monthOf(from); m = addMonths(m, -1)) out.push(m);
+    return out;
+  }
+
+  // The range presets on the toolbar. "native" follows the Console's own
+  // month picker (the historical behaviour, and the default); the rest are
+  // computed from today. "all" starts at the account's first month with
+  // activity, found once by resolveFirstMonth and cached.
+  const RANGE_MODES = ["native", "thisMonth", "last30", "last90", "all", "custom"];
+  const RANGE_LABELS = {
+    thisMonth: "This month",
+    last30: "Last 30 days",
+    last90: "Last 90 days",
+    all: "All time",
+    custom: "Custom range",
+  };
+  const EARLIEST_CUSTOM = "2020-01-01";
+  // "All time" discovery: walk back from the current month until this many
+  // consecutive months show no activity at all (a long quiet gap is still
+  // bridged), or this many months total. Probed months are cached for 30
+  // days and the result itself forever, so this costs requests once.
+  const ALL_TIME_EMPTY_STREAK = 6;
+  const ALL_TIME_MAX_MONTHS = 72;
+  const ALL_TIME_PROBE_BATCH = 6;
+  // How many not-yet-cached months a single range load will index the
+  // per-Actor breakdown for on its own (1 + 2 requests per paid Actor,
+  // each). Beyond that the chart still shows every day's totals, and the
+  // status offers a button to index the rest — so "All time" on an account
+  // with years of history can't fire hundreds of requests unasked.
+  const AUTO_INDEX_MONTHS = 6;
 
   const state = {
     month: null, // "2026-07-01", from the page's own requests
     actorIds: [], // native "Actor" filter, sniffed from those same requests ([] = all)
+    rangeMode: "native",
+    customRange: null, // { from: "YYYY-MM-DD", to: "YYYY-MM-DD" }
+    firstMonth: {}, // { [org]: "YYYY-MM-01" } resolved for "All time"
   };
 
   // Which organization's console we're looking at ("" = personal account).
@@ -79,16 +189,66 @@
     return (location.pathname.match(/^\/organization\/([^/]+)/) || [])[1] || "";
   }
 
-  // One string identifying what should currently be rendered: month +
-  // account + filter. Everything that loads or lands async compares against
-  // this, so a month switch, an account switch, and a filter switch are all
-  // handled identically.
-  function buildScopeKey(month, actorIds) {
-    return `${month}|${currentOrg()}|${actorIds.join(",")}`;
+  // The [from, to] day range the chart should show, or null when it can't be
+  // known yet (native mode before the page's first request has been sniffed).
+  // "All time" has from === null until resolveFirstMonth has run; the loader
+  // fills it in.
+  function currentRange() {
+    const today = todayUtc();
+    switch (state.rangeMode) {
+      case "native":
+        return state.month ? { from: monthOf(state.month), to: monthEnd(state.month) } : null;
+      case "thisMonth":
+        return { from: monthOf(today), to: today };
+      case "last30":
+        return { from: addDays(today, -29), to: today };
+      case "last90":
+        return { from: addDays(today, -89), to: today };
+      case "all":
+        return { from: state.firstMonth[currentOrg()] || null, to: today };
+      case "custom": {
+        const c = state.customRange;
+        if (!c) return null;
+        return { from: c.from, to: c.to < today ? c.to : today };
+      }
+      default:
+        return null;
+    }
   }
 
+  // Does the range reach into the current month? Only then do numbers still
+  // move, and only then does the poll run its periodic refreshes.
+  function rangeIsLive(range) {
+    return !!range && monthOf(range.to) === monthOf(todayUtc());
+  }
+
+  // One string identifying what should currently be rendered: mode + range +
+  // account + filter. Everything that loads or lands async compares against
+  // this, so a month switch, a preset switch, an account switch and a filter
+  // switch are all handled identically. "All time" deliberately leaves its
+  // (async-resolved) start out so discovering it doesn't look like a switch.
   function scopeKey() {
-    return state.month ? buildScopeKey(state.month, state.actorIds) : null;
+    const r = currentRange();
+    if (!r) return null;
+    const from = state.rangeMode === "all" ? "" : r.from;
+    return `${state.rangeMode}|${from}|${r.to}|${currentOrg()}|${state.actorIds.join(",")}`;
+  }
+
+  // Cache scope for the per-month records: org + native Actor filter. "" for
+  // the personal account with no filter keeps the historical un-suffixed key.
+  function cacheScope(actorIds) {
+    return (currentOrg() ? currentOrg() + "|" : "") + actorIds.join(",");
+  }
+
+  function setRangeMode(mode) {
+    if (!RANGE_MODES.includes(mode)) return;
+    state.rangeMode = mode;
+    savePref({ [PREF_KEYS.rangeMode]: mode });
+    hideTooltip();
+    syncToolbar();
+    // The poll would pick the new key up within 400 ms; kick it now so the
+    // switch feels instant.
+    maybeLoad();
   }
 
   chrome.storage.local.get(Object.values(PREF_KEYS)).then((r) => {
@@ -96,18 +256,34 @@
     if (r[PREF_KEYS.metricsOn]) metricsOn = { ...metricsOn, ...r[PREF_KEYS.metricsOn] };
     showNativeOn = !!r[PREF_KEYS.showNative];
     if (r[PREF_KEYS.tooltipActorCount] > 0) tooltipActorCount = r[PREF_KEYS.tooltipActorCount];
+    const c = r[PREF_KEYS.customRange];
+    if (c && /^\d{4}-\d{2}-\d{2}$/.test(c.from) && /^\d{4}-\d{2}-\d{2}$/.test(c.to) && c.from <= c.to) {
+      state.customRange = { from: c.from, to: c.to };
+    }
+    const mode = r[PREF_KEYS.rangeMode];
+    if (RANGE_MODES.includes(mode) && (mode !== "custom" || state.customRange)) state.rangeMode = mode;
+    highlightsOn = r[PREF_KEYS.highlights] !== false;
+    prefsLoaded = true;
     syncToolbar();
     drawChart();
-  });
+  }).catch(() => {});
 
   // The tooltip actor count is set from the toolbar popup (a separate
   // context from this content script), not from anything in this page, so
   // pick up a change made there live rather than requiring a reload.
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !changes[PREF_KEYS.tooltipActorCount]) return;
-    const next = changes[PREF_KEYS.tooltipActorCount].newValue;
-    tooltipActorCount = next > 0 ? next : DEFAULT_TOOLTIP_ACTOR_COUNT;
-    renderTooltip();
+    if (area !== "local") return;
+    if (changes[PREF_KEYS.tooltipActorCount]) {
+      const next = changes[PREF_KEYS.tooltipActorCount].newValue;
+      tooltipActorCount = next > 0 ? next : DEFAULT_TOOLTIP_ACTOR_COUNT;
+      renderTooltip();
+    }
+    // The highlights toggle lives in the popup's settings too (the only way
+    // back once the panel's own Hide button was used).
+    if (changes[PREF_KEYS.highlights]) {
+      highlightsOn = changes[PREF_KEYS.highlights].newValue !== false;
+      ensureHighlights();
+    }
   });
 
   // ---- token bridge -------------------------------------------------------
@@ -123,15 +299,64 @@
   window.addEventListener("aap-request-seen", (e) => {
     const { month, actorIds } = e.detail;
     if (!month) return;
+    // The user flipped the Console's own month picker while a preset range
+    // was showing: that's an explicit ask to see that month, so follow it.
+    // (The very first request of a page load only *sets* the month; it
+    // never overrides a persisted preset.)
+    const pickerMoved = state.month && month !== state.month && state.rangeMode !== "native";
     state.month = month;
     // Sorted so the same filter always yields the same scopeKey/cache key
     // regardless of the order the page put the ids in the query string.
     state.actorIds = [...(actorIds || [])].sort();
+    if (pickerMoved) setRangeMode("native");
   });
+
+  // Reloading the extension (chrome://extensions → Reload, or an update)
+  // while this tab is open leaves this script running as an orphan: its
+  // timers keep firing but every chrome.* API is gone ("extension context
+  // invalidated"), so the next toolbar rebuild would throw on
+  // chrome.storage. The reloaded extension injects a fresh copy on the next
+  // page load; the orphan just has to get out of the way.
+  let retired = false;
+  function contextAlive() {
+    if (retired) return false;
+    try {
+      return !!chrome.runtime?.id && !!chrome.storage;
+    } catch {
+      return false;
+    }
+  }
+  function isInvalidated(err) {
+    return /Extension context invalidated|Cannot read properties of undefined \(reading '(local|onChanged|storage|runtime)'\)/.test(String(err && err.message ? err.message : err));
+  }
+  function retireOrphan() {
+    if (retired) return;
+    retired = true;
+    clearInterval(poll);
+    clearInterval(routeWatch);
+    try {
+      unmountOverlay();
+    } catch {
+      /* best effort */
+    }
+  }
+  // Fire-and-forget preference write. Swallows the rejection an orphaned
+  // script gets (and retires it) so a pref click never logs an uncaught error.
+  function savePref(obj) {
+    if (!contextAlive()) return;
+    try {
+      chrome.storage.local.set(obj).catch((err) => {
+        if (isInvalidated(err)) retireOrphan();
+      });
+    } catch (err) {
+      if (isInvalidated(err)) retireOrphan();
+    }
+  }
 
   // ---- SPA route watcher ---------------------------------------------------
   let lastPath = null;
-  setInterval(() => {
+  const routeWatch = setInterval(() => {
+    if (!contextAlive()) return retireOrphan();
     const path = location.pathname;
     if (path === lastPath) return;
     lastPath = path;
@@ -145,6 +370,19 @@
     return document.querySelector('[class*="PaidActorProfitMarginChart"]');
   }
 
+  // Dismiss Apify's own chart tooltip by telling Chart.js/React the pointer
+  // left the native canvas. Both events bubble so React's root listener sees
+  // them; pointerout covers a Chart.js build listening to pointer events.
+  function dismissNativeTooltip(nativeCanvas) {
+    const init = { bubbles: true, cancelable: true, relatedTarget: document.body };
+    try {
+      nativeCanvas.dispatchEvent(new PointerEvent("pointerout", init));
+      nativeCanvas.dispatchEvent(new MouseEvent("mouseout", init));
+    } catch {
+      /* never let cleanup break the overlay */
+    }
+  }
+
   // Ensures: the native canvas is hidden, our toolbar sits just above the
   // chart wrapper (in normal document flow, not overlapping it), and our own
   // chart canvas + tooltip exist inside the wrapper. Safe to call repeatedly
@@ -152,6 +390,7 @@
   // whether that's on first paint or after Apify's own React tree re-renders
   // the wrapper and wipes out nodes it doesn't recognize.
   function ensureOverlay() {
+    if (!contextAlive()) return null;
     const wrapper = findChartWrapper();
     if (!wrapper) return null;
 
@@ -162,18 +401,20 @@
     // the native canvas is shown and our own overlay is display:none'd.
     const nativeCanvas = wrapper.querySelector("canvas:not(.aap-chart)");
     if (nativeCanvas) {
-      const vis = showNativeOn ? "" : "hidden";
+      const vis = nativeChartWanted() ? "" : "hidden";
       if (nativeCanvas.style.visibility !== vis) {
         nativeCanvas.style.visibility = vis;
         // If the pointer was over the native chart before we hid it (easy to
-        // do while the page is still loading), Chart.js has a tooltip painted
-        // into the canvas bitmap and only clears it on another pointer event
-        // — which a hidden canvas never receives. That stale tooltip then
-        // re-surfaces whenever the canvas is shown again (the "Show original
-        // Apify chart" toggle, or the brief window after a Console re-render
-        // before this poll re-hides it). Tell Chart.js the pointer left so it
-        // repaints without the tooltip.
-        if (vis === "hidden") nativeCanvas.dispatchEvent(new MouseEvent("mouseout"));
+        // do while the page is still loading), Apify's tooltip — an HTML
+        // `div.custom-tooltip` rendered by React from Chart.js's external
+        // tooltip hook, not a canvas paint — stays on screen: a hidden
+        // canvas never receives the mouseout that would dismiss it. Fake
+        // that mouseout. It MUST bubble with a relatedTarget outside the
+        // canvas: React listens at the document root and derives its
+        // leave/out logic from the bubbled event, so a non-bubbling
+        // MouseEvent (the previous fix) never reached it (verified on the
+        // live page, Sep 2026).
+        if (vis === "hidden") dismissNativeTooltip(nativeCanvas);
       }
     }
     if (getComputedStyle(wrapper).position === "static") wrapper.style.position = "relative";
@@ -208,8 +449,8 @@
       wrapper.appendChild(overlay);
     }
 
-    overlay.style.display = showNativeOn ? "none" : "";
-    if (showNativeOn) hideTooltip();
+    overlay.style.display = nativeChartWanted() ? "none" : "";
+    if (nativeChartWanted()) hideTooltip();
     return overlay;
   }
 
@@ -221,8 +462,12 @@
       return wrapper.previousElementSibling;
     }
 
+    const container = document.createElement("div");
+    container.className = TOOLBAR_CLASS;
+
     const toolbar = document.createElement("div");
-    toolbar.className = TOOLBAR_CLASS;
+    toolbar.className = "aap-toggles-row";
+    container.appendChild(toolbar);
 
     for (const m of METRICS) {
       const label = document.createElement("label");
@@ -238,7 +483,7 @@
           return;
         }
         metricsOn = next;
-        chrome.storage.local.set({ [PREF_KEYS.metricsOn]: metricsOn });
+        savePref({ [PREF_KEYS.metricsOn]: metricsOn });
         syncToolbar();
         drawChart();
       });
@@ -253,7 +498,14 @@
       dot.className = "aap-tt-dot";
       dot.style.background = m.color;
       labelText.appendChild(dot);
-      labelText.appendChild(document.createTextNode(m.label));
+      const text = document.createElement("span");
+      text.textContent = m.label;
+      if (m.kind === "bar") {
+        // Re-labelled by syncToolbar to whichever KPI tab is active.
+        dot.classList.add("aap-bar-dot");
+        text.classList.add("aap-bar-label");
+      }
+      labelText.appendChild(text);
       label.appendChild(labelText);
       toolbar.appendChild(label);
     }
@@ -265,7 +517,7 @@
     breakdownBox.className = "aap-toggle-checkbox aap-breakdown-checkbox";
     breakdownBox.addEventListener("change", () => {
       compositionOn = breakdownBox.checked;
-      chrome.storage.local.set({ [PREF_KEYS.composition]: compositionOn });
+      savePref({ [PREF_KEYS.composition]: compositionOn });
       drawChart();
     });
     breakdownLabel.appendChild(breakdownBox);
@@ -279,7 +531,7 @@
     nativeBox.className = "aap-toggle-checkbox aap-native-checkbox";
     nativeBox.addEventListener("change", () => {
       showNativeOn = nativeBox.checked;
-      chrome.storage.local.set({ [PREF_KEYS.showNative]: showNativeOn });
+      savePref({ [PREF_KEYS.showNative]: showNativeOn });
       drawChart();
     });
     nativeLabel.appendChild(nativeBox);
@@ -290,9 +542,245 @@
     status.className = "aap-status";
     toolbar.appendChild(status);
 
-    wrapper.insertAdjacentElement("beforebegin", toolbar);
+    // Apify Hub sync button — only rendered once a hub key is configured in
+    // the popup, so users who never set one up see no change.
+    const hubBtn = document.createElement("button");
+    hubBtn.type = "button";
+    hubBtn.className = "aap-hub-button";
+    hubBtn.textContent = "Sync to Apify Hub";
+    hubBtn.title = "Push every month of this account's history to Apify Hub, re-sending months it already has.";
+    hubBtn.hidden = true;
+    hubBtn.addEventListener("click", () => void hubBackfill(true));
+    toolbar.appendChild(hubBtn);
+    const hubStatus = document.createElement("span");
+    hubStatus.className = "aap-hub-status";
+    toolbar.appendChild(hubStatus);
+    AAP_HUB.settings()
+      .then((hub) => {
+        hubBtn.hidden = !hub.key;
+      })
+      .catch(() => {});
+    if (contextAlive()) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === "local" && changes[AAP_HUB.KEYS.key]) {
+          hubBtn.hidden = !changes[AAP_HUB.KEYS.key].newValue;
+        }
+      });
+    }
+
+    wrapper.insertAdjacentElement("beforebegin", container);
     syncToolbar();
-    return toolbar;
+    return container;
+  }
+
+  // ---- date-range control -------------------------------------------------
+  // Mounted right after the Console's own month picker (same flex row, same
+  // 8px gap) so it reads as part of the native filter bar:
+  //   [All Actors] [September 2026] [< >] (This month)(Last 30 days)(Last 90 days) [Custom range ▾]
+  // The three pills are presets; with none active the chart follows the
+  // month picker as before, and clicking the active pill again returns to
+  // it. Custom range opens a popover with two native date inputs (the
+  // browser's calendar dropdown) and Apply; once set, the button shows the
+  // dates. If the native picker can't be found (a Console redesign), the
+  // control falls back to the top of our own toolbar so it still works.
+  const RANGE_SELECT_CLASS = "aap-range-select";
+  const PILL_MODES = ["thisMonth", "last30", "last90"];
+  const CHEVRON_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M15 7.5c.71 0 1.08.822.652 1.352l-.063.07-5 5a.833.833 0 0 1-1.1.07l-.078-.07-5-5C3.88 8.4 4.208 7.5 5 7.5z"/></svg>';
+  const CALENDAR_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="3" y="4.5" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M3 8.5h14M7 2.5v3.5M13 2.5v3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+
+  function findNativePicker() {
+    return document.querySelector(".SequenceSelect");
+  }
+
+  function ensureRangeSelect(container) {
+    let sel = document.querySelector(`.${RANGE_SELECT_CLASS}`);
+    const picker = findNativePicker();
+    const parent = picker ? picker.parentElement : container;
+    if (sel && sel.parentElement !== parent) {
+      sel.remove();
+      sel = null;
+    }
+    if (!sel) {
+      sel = buildRangeSelect();
+      if (picker) {
+        picker.insertAdjacentElement("afterend", sel);
+        // The native header is a nowrap flex row with the filters on the
+        // left and "All discounts" + download on the right; our pills make
+        // the left group wide enough to push the right one off screen at
+        // laptop widths. Let the left group wrap onto a second line (row
+        // gap = its own 8px column gap) and keep the right group at its
+        // natural size, pinned to the first line.
+        const left = picker.parentElement;
+        left.style.flexWrap = "wrap";
+        left.style.rowGap = "8px";
+        left.style.flex = "1 1 auto";
+        const right = left.nextElementSibling;
+        if (right) {
+          right.style.flexShrink = "0";
+          right.style.alignSelf = "flex-start";
+        }
+      } else container.prepend(sel);
+      sel.classList.toggle("aap-range-select-fallback", !picker);
+      syncRangeSelect(sel);
+    }
+    return sel;
+  }
+
+  function buildRangeSelect() {
+    const sel = document.createElement("div");
+    sel.className = RANGE_SELECT_CLASS;
+    sel.setAttribute("role", "group");
+    sel.setAttribute("aria-label", "Date range");
+    sel.addEventListener("click", (e) => e.stopPropagation()); // clicks inside never reach the document "close" listeners
+
+    for (const mode of PILL_MODES) {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "aap-range-pill";
+      pill.dataset.mode = mode;
+      pill.textContent = RANGE_LABELS[mode];
+      pill.addEventListener("click", () => {
+        closeRangeMenu();
+        // Clicking the active pill hands the chart back to the month picker.
+        setRangeMode(state.rangeMode === mode ? "native" : mode);
+      });
+      sel.appendChild(pill);
+    }
+
+    const custom = document.createElement("div");
+    custom.className = "aap-range-custom-wrap";
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "aap-range-pill aap-range-trigger";
+    trigger.dataset.mode = "custom";
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.title = "Pick a custom date range";
+    trigger.innerHTML = `${CALENDAR_SVG}<span class="aap-range-trigger-label"></span>${CHEVRON_SVG}`;
+    trigger.addEventListener("click", () => toggleRangeMenu(sel));
+    custom.append(trigger, buildCustomPopover());
+    sel.appendChild(custom);
+    return sel;
+  }
+
+  function buildCustomPopover() {
+    const box = document.createElement("div");
+    box.className = "aap-range-menu aap-range-custom";
+    box.hidden = true;
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-label", "Custom date range");
+
+    const mk = (label, cls) => {
+      const l = document.createElement("label");
+      l.className = "aap-range-field";
+      l.appendChild(document.createTextNode(label));
+      const input = document.createElement("input");
+      input.type = "date";
+      input.className = cls;
+      input.min = EARLIEST_CUSTOM;
+      input.max = todayUtc();
+      l.appendChild(input);
+      return { l, input };
+    };
+    const from = mk("From", "aap-range-from");
+    const to = mk("To", "aap-range-to");
+    const err = document.createElement("div");
+    err.className = "aap-range-err";
+    const actions = document.createElement("div");
+    actions.className = "aap-range-actions";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "aap-range-clear";
+    clear.textContent = "Clear";
+    clear.title = "Back to the month picker";
+    clear.addEventListener("click", () => {
+      closeRangeMenu();
+      if (state.rangeMode === "custom") setRangeMode("native");
+    });
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "aap-range-apply";
+    apply.textContent = "Apply";
+    actions.append(clear, apply);
+    box.append(from.l, to.l, err, actions);
+
+    const submit = () => {
+      const f = from.input.value;
+      const t = to.input.value;
+      const today = todayUtc();
+      if (!f || !t) return void (err.textContent = "Pick both dates.");
+      if (f > t) return void (err.textContent = "From must be on or before To.");
+      if (t > today) return void (err.textContent = "To can't be in the future.");
+      if (f < EARLIEST_CUSTOM) return void (err.textContent = `From can't be before ${EARLIEST_CUSTOM}.`);
+      err.textContent = "";
+      state.customRange = { from: f, to: t };
+      savePref({ [PREF_KEYS.customRange]: state.customRange });
+      closeRangeMenu();
+      setRangeMode("custom");
+    };
+    apply.addEventListener("click", submit);
+    box.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submit();
+    });
+    return box;
+  }
+
+  function toggleRangeMenu(sel) {
+    const menu = sel.querySelector(".aap-range-menu");
+    if (!menu.hidden) return closeRangeMenu();
+    // Seed the inputs with the range on screen so "tweak what I'm looking
+    // at" is one click away, falling back to the last 30 days.
+    const cur = currentRange();
+    const today = todayUtc();
+    const from = menu.querySelector(".aap-range-from");
+    const to = menu.querySelector(".aap-range-to");
+    from.value = state.customRange?.from || cur?.from || addDays(today, -29);
+    to.value = state.customRange?.to || cur?.to || today;
+    from.max = today;
+    to.max = today;
+    menu.querySelector(".aap-range-err").textContent = "";
+    menu.hidden = false;
+    sel.querySelector(".aap-range-trigger").setAttribute("aria-expanded", "true");
+    from.focus();
+  }
+
+  // Any deliberate use of the Console's own month picker (choosing a month
+  // from its menu, or the prev/next arrows) hands the chart back to it —
+  // even when the chosen month is the one already shown, which fires no new
+  // request for the sniffer to notice. Capture phase, so React can't swallow
+  // it first.
+  document.addEventListener(
+    "click",
+    (e) => {
+      const t = e.target instanceof Element ? e.target : null;
+      if (!t || state.rangeMode === "native") return;
+      if (t.closest('.SequenceSelect [role="option"], .SequenceSelect [class*="option"], .SequenceSelect-Controls button')) {
+        setRangeMode("native");
+      }
+    },
+    true,
+  );
+
+  function closeRangeMenu() {
+    document.querySelectorAll(".aap-range-menu").forEach((m) => (m.hidden = true));
+    document.querySelectorAll(".aap-range-trigger").forEach((t) => t.setAttribute("aria-expanded", "false"));
+  }
+  document.addEventListener("click", closeRangeMenu);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeRangeMenu();
+  });
+
+  // Active pill, and the custom button's label (the dates once one is set).
+  function syncRangeSelect(sel) {
+    sel.querySelectorAll(".aap-range-pill").forEach((pill) => {
+      const active = pill.dataset.mode === state.rangeMode;
+      pill.classList.toggle("aap-range-active", active);
+      pill.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    const c = state.customRange;
+    sel.querySelector(".aap-range-trigger-label").textContent =
+      state.rangeMode === "custom" && c ? AAPF.rangeLabel(c.from, c.to) : RANGE_LABELS.custom;
   }
 
   // Reflects compositionOn/metricsOn onto whatever toolbar controls
@@ -304,16 +792,32 @@
       ? wrapper.previousElementSibling
       : null;
     if (!toolbar) return;
+    syncRangeRow(toolbar);
     toolbar.querySelectorAll(".aap-metric-checkbox").forEach((box) => {
       box.checked = !!metricsOn[box.dataset.metric];
     });
-    // Composition (stacking by Actor) only paints the Revenue bars.
+    // The bar toggle follows the active KPI tab (Costs / Revenue / Profit).
+    const bar = barMetric();
+    const barLabel = toolbar.querySelector(".aap-bar-label");
+    if (barLabel) barLabel.textContent = bar.label;
+    const barDot = toolbar.querySelector(".aap-bar-dot");
+    if (barDot) barDot.style.background = bar.color;
+    // Composition (stacking by Actor) only paints the bar metric.
     const breakdownBox = toolbar.querySelector(".aap-breakdown-checkbox");
     breakdownBox.checked = compositionOn;
     breakdownBox.disabled = !metricsOn.revenue;
-    breakdownBox.title = breakdownBox.disabled ? "Enable Revenue to see the actor breakdown" : "";
+    breakdownBox.title = breakdownBox.disabled ? `Enable ${bar.label} to see the actor breakdown` : "";
 
-    toolbar.querySelector(".aap-native-checkbox").checked = showNativeOn;
+    const nativeBox = toolbar.querySelector(".aap-native-checkbox");
+    nativeBox.checked = nativeChartWanted();
+    nativeBox.disabled = headline === "margin";
+    nativeBox.title = headline === "margin" ? "Margin is a ratio, so Apify's own chart is shown for it" : "";
+  }
+
+  // The range pills next to the native month picker.
+  function syncRangeRow(toolbar) {
+    const sel = ensureRangeSelect(toolbar);
+    if (sel) syncRangeSelect(sel);
   }
 
   function unmountOverlay() {
@@ -326,6 +830,9 @@
     const nativeCanvas = wrapper?.querySelector("canvas:not(.aap-chart)");
     if (nativeCanvas) nativeCanvas.style.visibility = "";
     document.querySelector(".aap-tooltip")?.remove();
+    document.querySelector(`.${RANGE_SELECT_CLASS}`)?.remove();
+    document.querySelector(`.${HIGHLIGHTS_CLASS}`)?.remove();
+    restoreKpiCards();
     // The tooltip element is gone, but the pin/day state is separate JS
     // state — without resetting it here, navigating back to the Insights
     // page later would find pinnedDay still set and onHover would keep
@@ -338,51 +845,102 @@
   // paint, AND the Console's own React tree periodically reconciles that
   // wrapper and wipes out nodes it doesn't recognize (including re-showing
   // the native canvas). Every 400ms: make sure the overlay/toolbar exist and
-  // the native canvas is hidden, load whichever month we've most recently
-  // learned about if we haven't already, and otherwise just redraw.
+  // the native canvas is hidden, load whichever range we should be showing
+  // if we haven't already, and otherwise just redraw.
   let loadedKey = null;
-  const poll = setInterval(() => {
-    if (!onInsightsRoute()) return;
-    const overlay = ensureOverlay();
-    if (!overlay) return;
+  let prefsLoaded = false; // the persisted range mode must be known before the first load
+
+  // Loads the current range if it isn't the one already loaded (or loading).
+  // Shared by the poll and by the range buttons.
+  function maybeLoad() {
+    if (!prefsLoaded || !onInsightsRoute() || !ensureOverlay()) return;
     const key = scopeKey();
     if (key && key !== loadedKey) {
       loadedKey = key;
-      loadAndRender(state.month, state.actorIds).catch(() => {}); // sets dayMetricsFetchedAt itself on success
-      return;
+      loadRange().catch(() => {});
+      return true;
     }
-    if (key && Date.now() - dayMetricsFetchedAt > DAY_METRICS_REFRESH_MS) {
-      refreshDayMetrics(state.month, state.actorIds);
+    return false;
+  }
+
+  const poll = setInterval(() => {
+    if (!contextAlive()) return retireOrphan();
+    try {
+      pollTick();
+    } catch (err) {
+      // A reload can land mid-tick: the check above passed, then chrome.*
+      // vanished under us. Anything else is a real bug and should surface.
+      if (isInvalidated(err)) retireOrphan();
+      else throw err;
+    }
+  }, 400);
+
+  function pollTick() {
+    if (!onInsightsRoute()) return;
+    // Follow the Console's KPI tab (Costs / Revenue / Profit / Margin).
+    const nextHeadline = nativeHeadline();
+    if (nextHeadline !== headline) {
+      headline = nextHeadline;
+      hideTooltip();
+      syncToolbar();
+      if (lastData) drawChart();
+    }
+    const overlay = ensureOverlay();
+    if (!overlay) return;
+    syncKpiCards();
+    // The first load of a range always runs, visible or not — macOS Chrome
+    // reports an occluded window as `document.hidden`, so gating the initial
+    // load on visibility left the chart blank until the window was uncovered.
+    // Only the *periodic* refreshes below pause while hidden.
+    if (maybeLoad()) return;
+    const key = scopeKey();
+    // Redraw before the visibility gate: Apify's React tree can recreate the
+    // chart wrapper (and so our canvas) while the tab is hidden, and a
+    // hidden tab that never redraws comes back to a blank chart. Drawing is
+    // local and cheap; only the network refreshes below wait for a viewer.
+    if (lastData) drawChart();
+    // A hidden tab doesn't refresh: nobody is looking, and every refresh is
+    // a request to Apify. It catches up via the staleness checks below the
+    // moment it's visible again.
+    if (document.hidden) return;
+    // Live refreshes only make sense while the range reaches into the
+    // current month — see rangeIsLive. A past range's numbers are final; one
+    // load per cache TTL is plenty. A failed load is retried regardless
+    // (ERROR_RETRY_MS).
+    const live = rangeIsLive(currentRange());
+    if (live && key && Date.now() - dayMetricsFetchedAt > DAY_METRICS_REFRESH_MS) {
+      refreshDayMetrics(monthOf(todayUtc()), state.actorIds);
     }
     // Periodically re-run the whole load (cache check + re-index once the
-    // cache has gone stale) so a long-open tab's per-Actor breakdown keeps up
-    // with today — see BREAKDOWN_REFRESH_MS. loadAndRender stamps
+    // current month's cache has gone stale) so a long-open tab's per-Actor
+    // breakdown keeps up with today — see BREAKDOWN_REFRESH_MS. Past months
+    // in the range are served straight from cache. loadRange stamps
     // breakdownRefreshedAt itself, which also covers the initial load.
-    if (key && lastData && !lastData.indexing && Date.now() - breakdownRefreshedAt > BREAKDOWN_REFRESH_MS) {
-      loadAndRender(state.month, state.actorIds).catch(() => {});
-      return;
+    if ((live || lastData?.error) && key && lastData && !lastData.indexing && Date.now() - breakdownRefreshedAt > BREAKDOWN_REFRESH_MS) {
+      loadRange().catch(() => {});
     }
-    if (lastData) drawChart();
-  }, 400);
+  }
   window.addEventListener("beforeunload", () => clearInterval(poll));
 
-  // Re-fetches just the account-wide day totals (not the per-Actor
-  // breakdown) so the headline Revenue/Costs/Runs/Results stay live for as
-  // long as the tab is left open on this page, instead of freezing at
-  // whatever they were when the month was first loaded.
+  // Re-fetches just the account-wide day totals of ONE month (not the
+  // per-Actor breakdown) so the headline Revenue/Costs/Runs/Results stay live
+  // for as long as the tab is left open on this page, instead of freezing at
+  // whatever they were when the range was first loaded. Only ever called for
+  // the current month — the only one whose totals still move.
   async function refreshDayMetrics(month, actorIds) {
     if (dayMetricsFetching) return;
     dayMetricsFetching = true;
-    const key = buildScopeKey(month, actorIds);
+    const key = scopeKey();
+    const scope = cacheScope(actorIds);
     try {
-      const [margin, runs] = await Promise.all([
-        AAP_API.profitMargin(month, actorIds),
-        AAP_API.runStatistics(month, actorIds),
-      ]);
-      if (key !== scopeKey()) return; // user switched month/filter mid-flight
+      const dayMetrics = await fetchDayMetrics(month, actorIds);
+      if (key !== scopeKey()) return; // user switched month/range/filter mid-flight
       dayMetricsFetchedAt = Date.now();
-      setData({ dayMetrics: buildDayMetrics(margin, runs) });
-    } catch {
+      monthData[month] = { ...monthData[month], dayMetrics };
+      await AAP_CACHE.setMetrics(month, scope, dayMetrics);
+      if (key === scopeKey()) publish();
+    } catch (err) {
+      if (isInvalidated(err)) return retireOrphan();
       dayMetricsFetchedAt = Date.now(); // back off; retry after the next interval regardless
     } finally {
       dayMetricsFetching = false;
@@ -390,16 +948,197 @@
   }
 
   // ---- data ------------------------------------------------------------
-  let indexRun = 0; // guards against a stale index finishing after a month switch
-  let lastData = null; // { month, dayMetrics, daily, actorCount, indexedAt, indexing, progress, error }
+  let indexRun = 0; // guards against a stale load finishing after a range switch
+  let lastData = null; // see publish(): { range, months, dayMetrics, daily, indexedMonths, actorCount, indexing, progress, pendingMonths, error }
   let compositionOn = false;
   let metricsOn = { revenue: true, runs: false, results: false };
   let showNativeOn = false;
+  let highlightsOn = true;
   let tooltipActorCount = DEFAULT_TOOLTIP_ACTOR_COUNT;
   let colorByActorId = new Map();
+  let iconByActorId = new Map(); // actorId -> pictureUrl, merged over the months on screen
   let dayMetricsFetchedAt = 0;
   let dayMetricsFetching = false;
   let breakdownRefreshedAt = 0;
+  let hubQueue = Promise.resolve(); // hub syncs run one at a time, never dropped
+  // Cache scope the automatic history walk has already run for this page
+  // session (see hubBackfill); the toolbar button ignores it.
+  let hubBackfillDoneFor = null;
+  // Everything loaded so far for the current cache scope (org + filter),
+  // per month: { dayMetrics, daily, actorCount, breakdown, indexedAt,
+  // complete }. Range views are assembled from this by publish(); switching
+  // between overlapping ranges (Last 30 → Last 90 → This month) reuses it
+  // without touching storage, let alone the network.
+  let monthData = {};
+  let monthDataScope = null;
+  // The scope key the user asked to index past AUTO_INDEX_MONTHS for.
+  let indexAllFor = null;
+
+  // Push the account's history to Apify Hub (see lib/hub.js). Apify Hub can
+  // only reconcile a day it was given, so once a key is configured the whole
+  // history is offered — not just the months on screen — and a month whose
+  // numbers haven't moved since the last push costs no request at all. The
+  // toolbar button forces a re-push (recovery after the hub loses rows);
+  // everything automatic skips unchanged months.
+  function syncToHub(reason, onlyMonth) {
+    hubQueue = hubQueue.then(() => doSyncToHub(reason, onlyMonth)).catch(() => {});
+    return hubQueue;
+  }
+
+  // One month, from what's already in monthData (a just-indexed month, or the
+  // current month after a re-index).
+  async function doSyncToHub(reason, onlyMonth) {
+    if (!lastData) return;
+    const months = (onlyMonth ? [onlyMonth] : lastData.months || []).filter((m) => monthData[m]?.daily);
+    if (!months.length) return;
+    try {
+      let last = null;
+      for (const m of months) {
+        const md = monthData[m];
+        last = await AAP_HUB.send(m, md.daily, md.dayMetrics, md.breakdown || null, { skipUnchanged: true });
+        if (last.skipped && !last.unchanged) return void setHubStatus("");
+        if (!last.ok) break;
+      }
+      if (last && !last.ok) setHubStatus(`✗ Apify Hub: ${last.message}`);
+      else if (last && !last.unchanged) setHubStatus(`✓ Apify Hub: ${last.message}`);
+    } catch (err) {
+      if (isInvalidated(err)) return retireOrphan();
+      setHubStatus(`✗ Apify Hub: ${String(err && err.message ? err.message : err)}`);
+    }
+  }
+
+  // Every month from the account's first with activity up to today, whether
+  // or not the current range covers it: day totals + per-Actor breakdown from
+  // cache where they're fresh, fetched/indexed where they aren't, then pushed.
+  // Runs on the hub queue (one month at a time, never concurrent with a
+  // single-month sync) and gives up the moment the scope changes under it.
+  function hubBackfill(force) {
+    hubQueue = hubQueue.then(() => doHubBackfill(force)).catch(() => {});
+    return hubQueue;
+  }
+
+  async function doHubBackfill(force) {
+    const hub = await AAP_HUB.settings();
+    if (!hub.key) return;
+    // A native Actor filter narrows every request to those Actors, so the
+    // numbers aren't the account's. Wait for an unfiltered view.
+    if (state.actorIds.length) return;
+    const org = currentOrg();
+    const scope = cacheScope([]);
+    const alive = () => contextAlive() && currentOrg() === org && state.actorIds.length === 0;
+    if (!force && hubBackfillDoneFor === scope) return;
+    hubBackfillDoneFor = scope; // claimed, so a re-render can't start a second walk
+    let completed = false;
+    try {
+      setHubStatus("Apify Hub: checking history…");
+      const first = state.firstMonth[org] || (await resolveFirstMonth(() => !alive(), { quiet: true }));
+      if (!alive() || !first) return;
+      state.firstMonth[org] = first;
+      const months = monthsBetween(first, todayUtc()); // newest first
+      const records = await AAP_HUB.lastSync();
+      let synced = 0;
+      let failed = null;
+      let incomplete = false; // a month this pass couldn't derive or push
+      for (const m of months) {
+        if (!alive()) return;
+        const key = AAP_HUB.monthKey(m);
+        const rec = records[key];
+        // A past month already pushed (or known empty) can't have changed:
+        // Apify finalizes it once the payout invoice lands, and the cached
+        // breakdown it was built from is what a re-derive would return.
+        if (!force && rec && rec.ok && !isCurrentMonth(m) && !isSettlingMonth(m)) continue;
+
+        const dayMetrics = await hubDayMetrics(m, scope, alive);
+        if (!alive()) return;
+        if (!dayMetrics) {
+          incomplete = true; // fetch failed; the next pass retries
+          continue;
+        }
+        if (isEmptyMetrics(dayMetrics)) {
+          await AAP_HUB.markEmpty(m);
+          continue;
+        }
+        setHubStatus(`Apify Hub: syncing ${AAPF.monthLabel(m)}…`);
+        const md = await hubBreakdown(m, scope, dayMetrics, alive);
+        if (!alive()) return;
+        if (!md) {
+          incomplete = true; // partial index; don't push an undercount
+          continue;
+        }
+        const r = await AAP_HUB.send(m, md.daily, dayMetrics, md.breakdown, { skipUnchanged: !force });
+        if (r.skipped && !r.unchanged) return void setHubStatus(""); // key removed mid-walk
+        if (!r.ok) {
+          failed = r;
+          break;
+        }
+        if (!r.unchanged) synced++;
+      }
+      if (!alive()) return;
+      completed = !failed && !incomplete;
+      if (failed) setHubStatus(`✗ Apify Hub: ${failed.message}`);
+      else if (synced) setHubStatus(`✓ Apify Hub: synced ${synced} month${synced === 1 ? "" : "s"}`);
+      else setHubStatus("✓ Apify Hub: up to date");
+    } catch (err) {
+      if (isInvalidated(err)) return retireOrphan();
+      setHubStatus(`✗ Apify Hub: ${describeError(err)}`);
+    } finally {
+      // A walk that stopped early (scope switched, a month failed, the token
+      // went stale) left months unsent: let the next load try again.
+      if (!completed) hubBackfillDoneFor = null;
+    }
+  }
+
+  // The month before this one keeps moving until Apify's payout invoice lands
+  // (lib/cache.js makes the same allowance), so a push of it isn't final
+  // either — re-check it while it can still change.
+  const HUB_SETTLING_DAYS = 14;
+  function isSettlingMonth(month) {
+    const now = new Date();
+    if (now.getUTCDate() > HUB_SETTLING_DAYS) return false;
+    const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+    return String(month).slice(0, 7) === prev;
+  }
+
+  // Day totals for one month for the backfill: memory, then cache, then the
+  // network. Returns null when the fetch failed.
+  async function hubDayMetrics(month, scope, alive) {
+    const inMemory = monthDataScope === scope ? monthData[month]?.dayMetrics : null;
+    if (inMemory && !isCurrentMonth(month)) return inMemory;
+    const cached = await AAP_CACHE.getMetrics(month, scope);
+    if (cached && !cached.stale) return cached.dayMetrics;
+    if (!alive()) return null;
+    try {
+      const dayMetrics = await fetchDayMetrics(month, []);
+      await AAP_CACHE.setMetrics(month, scope, dayMetrics);
+      return dayMetrics;
+    } catch (err) {
+      if (isInvalidated(err)) throw err;
+      // A month before the account existed can 4xx rather than come back
+      // empty — treat it as the empty month it is.
+      if (/HTTP (400|404|422)/.test(String(err && err.message))) return {};
+      return null;
+    }
+  }
+
+  // The per-Actor breakdown for one month for the backfill: cache if fresh,
+  // otherwise a full index. Returns null if the index came back partial (a
+  // pushed undercount would look like a real drop in the hub).
+  async function hubBreakdown(month, scope, dayMetrics, alive) {
+    const inMemory = monthDataScope === scope ? monthData[month] : null;
+    if (inMemory?.complete && !isCurrentMonth(month)) return inMemory;
+    const cached = await AAP_CACHE.get(month, scope);
+    const usable =
+      cached && !cached.stale && !(isCurrentMonth(month) && breakdownMissingRevenueDay(cached.daily, dayMetrics));
+    if (usable) return { daily: cached.daily, breakdown: cached.breakdown || null, complete: true };
+    if (!alive()) return null;
+    const r = await indexMonth(month, [], scope, dayMetrics, null, () => !alive());
+    return r.complete ? r : null;
+  }
+
+  function setHubStatus(text) {
+    const el = document.querySelector(`.${TOOLBAR_CLASS} .aap-hub-status`);
+    if (el) el.textContent = text;
+  }
 
   // True when some day has revenue in the account-wide totals but no rows in
   // the per-Actor breakdown — the signature of a breakdown indexed before
@@ -413,88 +1152,308 @@
     );
   }
 
-  async function loadAndRender(month, actorIds) {
+  // A month with no revenue, cost or runs on any day: nothing to index (and,
+  // for "All time" discovery, nothing to show).
+  function isEmptyMetrics(dayMetrics) {
+    return !Object.values(dayMetrics || {}).some((m) => m.revenue > 0 || m.cost > 0 || m.runs > 0);
+  }
+
+  // The two cheap account-wide calls for one month, merged per day.
+  async function fetchDayMetrics(month, actorIds) {
+    const [margin, runs] = await Promise.all([
+      AAP_API.profitMargin(month, actorIds),
+      AAP_API.runStatistics(month, actorIds),
+    ]);
+    return buildDayMetrics(margin, runs);
+  }
+
+  // Assembles lastData for the current range from monthData: day totals and
+  // per-Actor rows clipped to [from, to], colours ranked over the whole
+  // range (so an Actor keeps its colour across every day on screen), plus
+  // whatever load-state flags the caller passes.
+  function publish(extra) {
+    const range = currentRange();
+    if (!range) return;
+    const months = range.from ? monthsBetween(range.from, range.to) : [];
+    const inRange = (day) => (!range.from || day >= range.from) && day <= range.to;
+    const dayMetrics = {};
+    const daily = {};
+    const indexedMonths = [];
+    const actors = new Set();
+    const icons = new Map();
+    for (const m of months) {
+      const md = monthData[m];
+      if (!md) continue;
+      for (const [id, url] of Object.entries(md.icons || {})) icons.set(id, url);
+      for (const [day, v] of Object.entries(md.dayMetrics || {})) if (inRange(day)) dayMetrics[day] = v;
+      if (md.daily) {
+        indexedMonths.push(m);
+        for (const [day, rows] of Object.entries(md.daily)) {
+          if (!inRange(day)) continue;
+          daily[day] = rows;
+          for (const r of rows) actors.add(r.actorId);
+        }
+      }
+    }
+    colorByActorId = buildColorMap(daily);
+    iconByActorId = icons;
+    setData({
+      range,
+      months,
+      dayMetrics,
+      daily,
+      indexedMonths,
+      actorCount: actors.size,
+      progress: null,
+      phase: null,
+      ...extra,
+    });
+  }
+
+  // Loads whatever currentRange() says should be on screen:
+  //   1. day totals for every month in the range (2 requests per month not
+  //      in cache; past months stay cached for 30 days) — the chart is
+  //      drawn as soon as these land, newest month first;
+  //   2. the per-Actor breakdown, one month at a time, newest first, from
+  //      cache where it's fresh, indexing at most AUTO_INDEX_MONTHS uncached
+  //      months (or all of them once the user clicked "Load more").
+  // "All time" first resolves the account's earliest month (see
+  // resolveFirstMonth). Any range switch mid-way bumps indexRun, and every
+  // await below checks it, so a superseded load stops spending requests.
+  async function loadRange() {
+    if (!contextAlive()) return;
     const overlay = ensureOverlay();
     if (!overlay) return;
     breakdownRefreshedAt = Date.now(); // pace the poll's periodic re-run
-    // "" for the personal account keeps the historical un-suffixed cache key.
-    const scope = (currentOrg() ? currentOrg() + "|" : "") + actorIds.join(",");
-
-    const cached = await AAP_CACHE.get(month, scope);
-    let daily = cached?.daily || null;
-    let actorCount = cached?.actorCount ?? null;
-    let indexedAt = cached?.updatedAt ?? null;
-    let indexing = !cached || cached.stale;
-    if (daily) colorByActorId = buildColorMap(daily);
-
-    if (cached?.dayMetrics) setData({ month, daily, actorCount, indexedAt, indexing, dayMetrics: cached.dayMetrics, progress: null });
-    else setData({ month, daily, actorCount, indexedAt, indexing, progress: null });
-
-    // Always fetch the cheap day totals (scoped to the native Actor filter,
-    // if any) so the chart is accurate even while (or instead of) a full
-    // re-index runs. Shares refreshDayMetrics with the periodic poll so the
-    // two never race.
-    await refreshDayMetrics(month, actorIds);
-    let dayMetrics = lastData?.dayMetrics || cached?.dayMetrics || null;
-
-    // A cache can be fresh by TTL yet already wrong: indexed before today's
-    // first paid run, it has no per-Actor rows for a day the just-fetched
-    // account totals show revenue on, and the tooltip would claim "No paid
-    // Actor activity" for a day that plainly earned. Re-index despite the TTL.
-    if (!indexing && breakdownMissingRevenueDay(daily, dayMetrics)) indexing = true;
-
-    if (!indexing) return;
-
     const myRun = ++indexRun;
-    try {
-      const raw = await AAP_API.actorBreakdown(month, actorIds);
-      const breakdown = Array.isArray(raw) ? raw : raw?.monetizationPerActor || [];
-      const paidActors = breakdown
-        .map((item) => ({
-          actorId: item.actor?._id,
-          actorName: item.actor?.title || item.actor?.name || item.actor?._id,
-          totalRevenueUsd: item.earningsStats?.totalRevenueUsd ?? 0,
-          totalCostUsd: item.earningsStats?.totalCostUsd ?? 0,
-        }))
-        .filter((a) => a.actorId && (a.totalRevenueUsd > 0 || a.totalCostUsd > 0));
-
-      const perActor = await AAP_API.pooled(
-        paidActors,
-        async (actor) => {
-          const [margin, runs] = await Promise.all([
-            AAP_API.profitMargin(month, [actor.actorId]),
-            AAP_API.runStatistics(month, [actor.actorId]),
-          ]);
-          return { actor, margin, runs };
-        },
-        (done, total) => {
-          if (myRun !== indexRun) return;
-          setData({ month, daily, actorCount: paidActors.length, indexedAt, indexing: true, dayMetrics, progress: { done, total } });
-        },
-      );
-      if (myRun !== indexRun) return; // a newer month started loading
-
-      daily = buildDailyIndex(perActor);
-      colorByActorId = buildColorMap(daily);
-      actorCount = paidActors.length;
-      indexedAt = Date.now();
-
-      // A handful of per-Actor fetches can transiently fail (a network blip,
-      // the auth token racing readiness right after page load — see
-      // pooled()'s per-item catch). Caching that partial result would lock in
-      // an undercounted breakdown for the full 15-minute TTL, silently, since
-      // indexing:false looks identical to a clean run. Only cache complete
-      // passes; a partial one still renders (better than nothing) but the
-      // next page load retries instead of serving stale wrong data.
-      const failedCount = perActor.filter((e) => e === null).length;
-      if (failedCount === 0) {
-        await AAP_CACHE.set(month, scope, { daily, actorCount, dayMetrics });
-      }
-      setData({ month, daily, actorCount, indexedAt, indexing: false, dayMetrics, progress: null });
-    } catch (err) {
-      if (myRun !== indexRun) return;
-      setData({ month, daily, actorCount, indexedAt, indexing: false, dayMetrics, progress: null, error: String(err) });
+    const key = scopeKey();
+    const actorIds = state.actorIds;
+    const scope = cacheScope(actorIds);
+    const alive = () => myRun === indexRun && key === scopeKey();
+    if (monthDataScope !== scope) {
+      monthData = {};
+      monthDataScope = scope;
     }
+
+    try {
+      let range = currentRange();
+      if (!range) return;
+      // A fresh pass: clear the previous one's outcome. Overlapping ranges
+      // render immediately from monthData here, before any I/O.
+      publish({ indexing: true, phase: "Loading…", error: null, pendingMonths: [] });
+      if (!range.from) {
+        publish({ indexing: true, phase: "Finding your first month…" });
+        const first = await resolveFirstMonth(() => !alive());
+        if (!alive() || !first) return;
+        state.firstMonth[currentOrg()] = first;
+        range = currentRange();
+      }
+      const months = monthsBetween(range.from, range.to);
+
+      // 1. Day totals. Memory first, then storage, then the network.
+      const missing = [];
+      for (const m of months) {
+        if (monthData[m]?.dayMetrics && !isCurrentMonth(m)) continue;
+        const c = await AAP_CACHE.getMetrics(m, scope);
+        if (c && !c.stale) {
+          monthData[m] = { ...monthData[m], dayMetrics: c.dayMetrics };
+          if (isCurrentMonth(m)) dayMetricsFetchedAt = c.updatedAt; // the poll's 60 s refresh counts from the cached fetch
+        } else missing.push(m);
+      }
+      if (!alive()) return;
+      publish({ indexing: true, phase: missing.length ? "Loading day totals…" : null });
+      const fetched = await AAP_API.pooled(
+        missing,
+        async (m) => {
+          const dayMetrics = await fetchDayMetrics(m, actorIds);
+          if (!alive()) return true;
+          monthData[m] = { ...monthData[m], dayMetrics };
+          if (isCurrentMonth(m)) dayMetricsFetchedAt = Date.now();
+          await AAP_CACHE.setMetrics(m, scope, dayMetrics);
+          publish({ indexing: true, phase: "Loading day totals…" });
+          return true;
+        },
+        null,
+        () => !alive(),
+      );
+      if (!alive()) return;
+      if (fetched.some((r) => r === null)) throw new Error("Failed to fetch day totals");
+
+      // 2. Per-Actor breakdown, newest month first.
+      let budget = indexAllFor === key ? Infinity : AUTO_INDEX_MONTHS;
+      const pending = [];
+      for (const m of months) {
+        if (!alive()) return;
+        const dayMetrics = monthData[m]?.dayMetrics || {};
+        if (monthData[m]?.complete && !isCurrentMonth(m)) continue; // loaded earlier this session
+        const cached = await AAP_CACHE.get(m, scope);
+        if (!alive()) return;
+        // A cache can be fresh by TTL yet already wrong: indexed before
+        // today's first paid run, it has no per-Actor rows for a day the
+        // just-fetched totals show revenue on. Re-index despite the TTL.
+        const usable = cached && !cached.stale && !(isCurrentMonth(m) && breakdownMissingRevenueDay(cached.daily, dayMetrics));
+        if (usable) {
+          monthData[m] = { ...monthData[m], daily: cached.daily, actorCount: cached.actorCount, breakdown: cached.breakdown || null, icons: cached.icons || {}, indexedAt: cached.updatedAt, complete: true };
+          publish({ indexing: true });
+          continue;
+        }
+        // Nothing happened this month: no Actor to index. Cache that as a
+        // complete (empty) breakdown so it's never probed again.
+        if (isEmptyMetrics(dayMetrics)) {
+          monthData[m] = { ...monthData[m], daily: {}, actorCount: 0, breakdown: [], indexedAt: Date.now(), complete: true };
+          await AAP_CACHE.set(m, scope, { daily: {}, actorCount: 0, breakdown: [], dayMetrics });
+          continue;
+        }
+        if (budget <= 0) {
+          pending.push(m);
+          continue;
+        }
+        budget--;
+        const r = await indexMonth(m, actorIds, scope, dayMetrics, (done, total) => {
+          if (alive()) publish({ indexing: true, progress: { done, total, month: m, monthsLeft: months.length - 1 - months.indexOf(m) } });
+        }, () => !alive());
+        if (!alive()) return;
+        monthData[m] = { ...monthData[m], ...r };
+        publish({ indexing: true });
+        // Only a complete, unfiltered pass is worth pushing: a partial one
+        // would undercount, and a native-filter scope isn't the whole account.
+        if (r.complete && actorIds.length === 0) {
+          const hub = await AAP_HUB.settings();
+          if (hub.key) void syncToHub("auto", m);
+        }
+      }
+      if (!alive()) return;
+      publish({ indexing: false, pendingMonths: pending });
+      // The chart is complete; now make sure Apify Hub has every month, not
+      // just the ones this range happened to cover. Queued, so it can't
+      // compete with the load that just finished.
+      if (actorIds.length === 0) void hubBackfill(false);
+    } catch (err) {
+      if (isInvalidated(err)) return retireOrphan();
+      if (!alive()) return;
+      // Schedule the poll's next full load ERROR_RETRY_MS from now instead
+      // of a full BREAKDOWN_REFRESH_MS away.
+      breakdownRefreshedAt = Date.now() - BREAKDOWN_REFRESH_MS + ERROR_RETRY_MS;
+      publish({ indexing: false, error: describeError(err) });
+    }
+  }
+
+  // Indexes one month's per-Actor breakdown: the month's Actor list (one
+  // call), then profit-margin + run-statistics per paid Actor (two calls
+  // each, 5 in flight). Caches only complete passes: a handful of per-Actor
+  // fetches can transiently fail (a network blip, the auth token racing
+  // readiness right after page load — see pooled()'s per-item catch), and
+  // caching that would lock in an undercounted breakdown for the full TTL,
+  // silently. A partial pass still renders (better than nothing) but the
+  // next load retries instead of serving stale wrong data.
+  async function indexMonth(month, actorIds, scope, dayMetrics, onProgress, shouldStop) {
+    const raw = await AAP_API.actorBreakdown(month, actorIds);
+    // Keep only what the hub payload reads (lib/hub.js) — the raw items carry
+    // whole Actor objects, which would bloat the per-month cache record.
+    const breakdown = (Array.isArray(raw) ? raw : raw?.monetizationPerActor || []).map((item) => ({
+      actor: { _id: item.actor?._id, title: item.actor?.title, name: item.actor?.name, pictureUrl: item.actor?.pictureUrl },
+      earningsStats: item.earningsStats,
+      runsStats: item.runsStats,
+      usersStats: item.usersStats,
+    }));
+    const paidActors = breakdown
+      .map((item) => ({
+        actorId: item.actor?._id,
+        actorName: item.actor?.title || item.actor?.name || item.actor?._id,
+        totalRevenueUsd: item.earningsStats?.totalRevenueUsd ?? 0,
+        totalCostUsd: item.earningsStats?.totalCostUsd ?? 0,
+      }))
+      .filter((a) => a.actorId && (a.totalRevenueUsd > 0 || a.totalCostUsd > 0));
+
+    const perActor = await AAP_API.pooled(
+      paidActors,
+      async (actor) => {
+        const [margin, runs] = await Promise.all([
+          AAP_API.profitMargin(month, [actor.actorId]),
+          AAP_API.runStatistics(month, [actor.actorId]),
+        ]);
+        return { actor, margin, runs };
+      },
+      onProgress,
+      shouldStop,
+    );
+    const daily = buildDailyIndex(perActor);
+    const complete = perActor.every((e) => e != null);
+    const actorCount = paidActors.length;
+    // Actor icons (the Console's own pictureUrl), kept as a small per-month
+    // map rather than on every daily row.
+    const icons = {};
+    for (const item of breakdown) if (item.actor._id && item.actor.pictureUrl) icons[item.actor._id] = item.actor.pictureUrl;
+    if (complete) await AAP_CACHE.set(month, scope, { daily, actorCount, breakdown, dayMetrics, icons });
+    return { daily, actorCount, breakdown, icons, indexedAt: Date.now(), complete };
+  }
+
+  // Finds the account's earliest month with any activity, for "All time":
+  // walks back from the current month, ALL_TIME_PROBE_BATCH months at a
+  // time (in parallel), until ALL_TIME_EMPTY_STREAK consecutive months are
+  // empty or ALL_TIME_MAX_MONTHS have been checked. Probed months go into
+  // the ordinary day-totals cache (they're wanted for the chart anyway), and
+  // the answer is cached for good — activity can't appear before it.
+  // Always probes account-wide, whatever the native filter says.
+  async function resolveFirstMonth(shouldStop, opts) {
+    const quiet = !!(opts && opts.quiet); // the hub walk runs behind whatever is on screen
+    const org = currentOrg();
+    const cached = await AAP_CACHE.getFirstMonth(org);
+    if (cached) return cached;
+    const scope = cacheScope([]);
+    let month = monthOf(todayUtc());
+    let firstSeen = null;
+    let streak = 0;
+    let checked = 0;
+    while (checked < ALL_TIME_MAX_MONTHS && streak < ALL_TIME_EMPTY_STREAK) {
+      if (shouldStop()) return null;
+      const batch = [];
+      for (let i = 0; i < ALL_TIME_PROBE_BATCH; i++) {
+        batch.push(month);
+        month = addMonths(month, -1);
+      }
+      if (!quiet) publish({ indexing: true, phase: `Finding your first month… (${AAPF.monthLabel(batch[batch.length - 1])})` });
+      const results = await Promise.all(
+        batch.map(async (m) => {
+          const c = await AAP_CACHE.getMetrics(m, scope);
+          if (c && !c.stale) return c.dayMetrics;
+          let dayMetrics;
+          try {
+            dayMetrics = await fetchDayMetrics(m, []);
+          } catch (err) {
+            // A month before the account existed may 4xx rather than come
+            // back empty; auth/network failures still propagate.
+            if (/HTTP (400|404|422)/.test(String(err && err.message))) dayMetrics = {};
+            else throw err;
+          }
+          await AAP_CACHE.setMetrics(m, scope, dayMetrics);
+          return dayMetrics;
+        }),
+      );
+      for (let i = 0; i < batch.length; i++) {
+        checked++;
+        if (isEmptyMetrics(results[i])) streak++;
+        else {
+          streak = 0;
+          firstSeen = batch[i];
+        }
+        if (streak >= ALL_TIME_EMPTY_STREAK) break;
+      }
+    }
+    const first = firstSeen || monthOf(todayUtc());
+    await AAP_CACHE.setFirstMonth(org, first);
+    return first;
+  }
+
+  // "TypeError: Failed to fetch" is what the browser says for any network-
+  // level failure (offline, DNS, TLS, a blocked request). Say so, and that
+  // we'll retry, instead of echoing the raw exception.
+  function describeError(err) {
+    const msg = String(err && err.message ? err.message : err);
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      return `network error reaching Apify, retrying in ${Math.round(ERROR_RETRY_MS / 1000)}s`;
+    }
+    return msg;
   }
 
   // Merges profit-margin + run-statistics into
@@ -534,7 +1493,8 @@
   // Which metric drives sorting/coloring when more than one is active:
   // Revenue > Runs > Results, whichever is checked first.
   function primaryMetric() {
-    return METRICS.find((m) => metricsOn[m.key])?.key || "revenue";
+    if (metricsOn.revenue) return barMetric().key;
+    return METRICS.find((m) => m.kind === "line" && metricsOn[m.key])?.key || barMetric().key;
   }
 
   // perActor: [{ actor, margin, runs }] -> { [date]: [{ actorId, name, revenue, cost, profit, margin, runs, results, successRate }] }
@@ -558,6 +1518,7 @@
           profit: m?.profitUsd ?? 0,
           margin: m?.margin ?? null,
           runs: r?.TOTAL ?? null,
+          succeeded: r?.SUCCEEDED ?? null,
           results: r?.RESULTS ?? null,
           successRate: r && r.TOTAL ? r.SUCCEEDED / r.TOTAL : null,
         };
@@ -648,6 +1609,7 @@
   }
 
   function drawChart() {
+    if (headline === "margin") return; // native chart is on screen
     const overlay = ensureOverlay();
     if (!overlay || !lastData) return;
     syncToolbar();
@@ -655,17 +1617,8 @@
     const wrapper = overlay.parentElement;
     const toolbar = wrapper.previousElementSibling;
     const status = toolbar?.querySelector(".aap-status");
-    if (status) {
-      if (lastData.error) {
-        status.textContent = `Couldn't load Actor data (${lastData.error}).`;
-      } else if (lastData.progress) {
-        status.textContent = `Indexing Actors… ${lastData.progress.done}/${lastData.progress.total}`;
-      } else if (lastData.indexing) {
-        status.textContent = "Indexing Actors…";
-      } else {
-        status.textContent = "";
-      }
-    }
+    if (status) renderStatus(status);
+    ensureHighlights();
 
     const canvas = overlay.querySelector(".aap-chart");
     const rect = wrapper.getBoundingClientRect();
@@ -681,7 +1634,16 @@
 
     const days = Object.keys(lastData.dayMetrics || {}).sort();
     canvas.__aapDays = days; // read back by the hover handler
-    if (!days.length) return;
+    if (!days.length) {
+      if (!lastData.indexing && !lastData.error) {
+        ctx.font = `13px ${getComputedStyle(wrapper).fontFamily || "sans-serif"}`;
+        ctx.fillStyle = AXIS_LABEL_COLOR;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("No activity in this range.", rect.width / 2, rect.height / 2);
+      }
+      return;
+    }
 
     const showLeft = metricsOn.revenue;
     const lineMetrics = METRICS.filter((m) => m.kind === "line" && metricsOn[m.key]);
@@ -690,7 +1652,8 @@
     // both its own max AND the shared gridline count via niceScale; every
     // other axis rounds its max up onto that same count.
     const dataMax = (key) => Math.max(1, ...days.map((d) => metricValue(d, key)));
-    const primaryKey = showLeft ? "revenue" : lineMetrics[0]?.key;
+    const bar = barMetric();
+    const primaryKey = showLeft ? bar.key : lineMetrics[0]?.key;
     const { max: primaryMax, ticks } = niceScale(primaryKey ? dataMax(primaryKey) : 1);
     const leftMax = showLeft ? primaryMax : 1;
     // Each line metric gets its own scale — see the note on PAD above.
@@ -727,7 +1690,9 @@
     const plotW = rect.width - leftPad - rightPad;
     const plotH = rect.height - PAD.top - PAD.bottom;
     const slot = plotW / days.length;
-    const barW = Math.max(4, slot * 0.6);
+    // Dense ranges (a year is ~2-3px per day) get edge-to-edge bars; roomier
+    // ones keep the usual 60% bar with a gap.
+    const barW = slot < 6 ? Math.max(1, slot) : Math.max(4, slot * 0.6);
 
     // gridlines, shared across every axis (see comment above)
     ctx.strokeStyle = "rgba(255,255,255,0.08)";
@@ -751,29 +1716,22 @@
       });
     }
 
-    // x-axis labels: thin to a clean day step (every 1/2/4/7/14 days) like
-    // Apify's own chart, based on the measured label width. The old
-    // heuristic assumed ~34px per label, which under-measures "Jul 27"-style
-    // labels — a month view labeled every single day and the labels ran into
-    // each other. The forced last-day label is gone for the same reason: it
-    // collided with the preceding stepped label.
-    const maxLabelW = Math.max(...days.map((d) => ctx.measureText(AAPF.shortDate(d)).width));
-    const labelEvery = [1, 2, 4, 7, 14].find((s) => slot * s >= maxLabelW + 24) ?? days.length;
+    // x-axis labels — see xAxisLabels for the thinning rules.
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    days.forEach((day, i) => {
-      if (i % labelEvery === 0) {
-        const x = leftPad + i * slot + slot / 2;
-        ctx.fillStyle = AXIS_LABEL_COLOR;
-        ctx.fillText(AAPF.shortDate(day), x, rect.height - PAD.bottom + 6);
-      }
-    });
+    ctx.fillStyle = AXIS_LABEL_COLOR;
+    for (const { i, text } of xAxisLabels(days, slot, ctx)) {
+      ctx.fillText(text, leftPad + i * slot + slot / 2, rect.height - PAD.bottom + 6);
+    }
 
-    // Revenue bars (left axis), optionally stacked by Actor.
+    // Bar metric (Costs / Revenue / Profit, left axis), optionally stacked
+    // by Actor. A negative day (profit can be) draws as an empty slot — the
+    // axis starts at $0 like Apify's own — its value still shows in the
+    // tooltip.
     if (showLeft) {
       days.forEach((day, i) => {
         const x = leftPad + i * slot + slot / 2;
-        const total = metricValue(day, "revenue");
+        const total = Math.max(0, metricValue(day, bar.key));
         const barH = (total / leftMax) * plotH;
         const yTop = PAD.top + plotH - barH;
 
@@ -782,7 +1740,7 @@
           const grouped = new Map();
           for (const row of lastData.daily[day]) {
             const key = colorByActorId.get(row.actorId) || OTHER_COLOR;
-            grouped.set(key, (grouped.get(key) || 0) + (row.revenue || 0));
+            grouped.set(key, (grouped.get(key) || 0) + Math.max(0, row[bar.key] || 0));
           }
           // Stack every bar in the SAME order — by each Actor's month-long
           // revenue rank (its position in PALETTE), with the merged "other
@@ -803,7 +1761,7 @@
             acc += segH;
           }
         } else {
-          ctx.fillStyle = METRICS[0].color;
+          ctx.fillStyle = bar.color;
           ctx.fillRect(x - barW / 2, yTop, barW, barH);
         }
       });
@@ -828,12 +1786,295 @@
       drawSmoothLine(ctx, pts);
       ctx.stroke();
 
-      for (const p of pts) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
+      // Point markers only when there's room for them; on a dense range
+      // they'd merge into a thick smear over the line.
+      if (slot >= 6) {
+        for (const p of pts) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
+  }
+
+  // x-axis labels thinned to a clean day step (every 1/2/4/7/14 days) like
+  // Apify's own chart, based on the measured label width (a fixed ~34px
+  // guess under-measures "Jul 27"-style labels and they ran into each
+  // other). Once even every-14-days won't fit — a multi-month range — label
+  // month starts instead ("Sep 2026"), thinned to every 2nd/3rd/6th/12th
+  // month the same way.
+  function xAxisLabels(days, slot, ctx) {
+    const dayW = Math.max(...days.map((d) => ctx.measureText(AAPF.shortDate(d)).width));
+    const every = [1, 2, 4, 7, 14].find((s) => slot * s >= dayW + 24);
+    if (every) return days.map((d, i) => (i % every === 0 ? { i, text: AAPF.shortDate(d) } : null)).filter(Boolean);
+    const starts = days.map((d, i) => ({ d, i })).filter((x) => x.d.endsWith("-01"));
+    if (!starts.length) return [{ i: 0, text: AAPF.shortDate(days[0]) }];
+    const monthW = Math.max(...starts.map((x) => ctx.measureText(AAPF.monthLabel(x.d)).width));
+    const mEvery = [1, 2, 3, 6, 12].find((s) => slot * 28 * s >= monthW + 24) ?? 12;
+    return starts.filter((_, k) => k % mEvery === 0).map((x) => ({ i: x.i, text: AAPF.monthLabel(x.d) }));
+  }
+
+  // The toolbar status line: load progress, errors, or — once a range has
+  // more uncached months than AUTO_INDEX_MONTHS — how much of the range has
+  // a per-Actor breakdown, with a button to index the rest.
+  function renderStatus(status) {
+    const d = lastData;
+    // Rebuilding on every 400 ms poll tick would swap the "Load more" button
+    // out from under a click in progress; only touch the DOM on a change.
+    const sig = JSON.stringify([d.error, d.progress, d.indexing, d.phase, d.pendingMonths, d.months?.length]);
+    if (status.dataset.sig === sig) return;
+    status.dataset.sig = sig;
+    status.replaceChildren();
+    const text = (t) => status.appendChild(document.createTextNode(t));
+    if (d.error) return text(`Couldn't load Actor data (${d.error}).`);
+    if (d.progress) {
+      const { done, total, month, monthsLeft } = d.progress;
+      const which = (d.months || []).length > 1 ? `${AAPF.monthLabel(month)} ` : "";
+      const more = monthsLeft > 0 ? ` (${monthsLeft} more month${monthsLeft === 1 ? "" : "s"} to go)` : "";
+      return text(`Indexing ${which}Actors… ${done}/${total}${more}`);
+    }
+    if (d.indexing) return text(d.phase || "Indexing Actors…");
+    const pending = d.pendingMonths || [];
+    if (!pending.length) return;
+    const months = d.months || [];
+    const indexedCount = months.length - pending.length;
+    // Rough request estimate for the button: 1 + 2 per paid Actor, using the
+    // months already indexed as the yardstick (20 Actors if none is).
+    const counts = (d.indexedMonths || []).map((m) => monthData[m]?.actorCount).filter((n) => n > 0);
+    const avg = counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 20;
+    const est = Math.round(pending.length * (1 + 2 * avg));
+    text(`Actor breakdown covers ${indexedCount} of ${months.length} months. `);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "aap-link-btn";
+    btn.textContent = `Load ${pending.length} more (~${est} requests)`;
+    btn.title = "Index the per-Actor breakdown for the rest of the range. The chart's day totals are already complete.";
+    btn.addEventListener("click", () => {
+      indexAllFor = scopeKey();
+      loadedKey = null; // force maybeLoad to start a fresh pass
+      maybeLoad();
+    });
+    status.appendChild(btn);
+  }
+
+  // ---- KPI cards (Costs / Revenue / Profit / Margin) ---------------------------
+  // The Console's four headline cards above the chart only ever show the
+  // picker month. While a preset or custom range is active we swap the figure
+  // in each card for the range's total (formatted the way Apify does, "$4.8K"
+  // / "98.82%"), so the header agrees with the chart underneath; the hover
+  // title names the range and keeps Apify's own month figure. Back on the
+  // picker month the native figures are restored. The Console re-renders
+  // these on its own refresh, so this runs on every poll tick and re-applies
+  // only when the text differs.
+
+  function kpiCards() {
+    const out = [];
+    for (const tab of document.querySelectorAll('[class*="StyledLargeTabNav"] a[role="tab"]')) {
+      const label = (tab.textContent || "").trim().toLowerCase();
+      const key = label.startsWith("cost") ? "cost" : label.startsWith("revenue") ? "revenue" : label.startsWith("profit") ? "profit" : label.startsWith("margin") ? "margin" : null;
+      if (!key) continue;
+      const value = [...tab.querySelectorAll("span")].find((el) => el.children.length === 0 && /^-?\$|%$|^–$/.test(el.textContent.trim()));
+      if (value) out.push({ tab, key, value });
+    }
+    return out;
+  }
+
+  // "$57.10" below a thousand, "$4.8K" / "$1.2M" above — what the cards show.
+  function kpiMoney(n) {
+    const abs = Math.abs(n);
+    const sign = n < 0 ? "-" : "";
+    if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(1)}M`;
+    if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`;
+    return `${sign}$${abs.toFixed(2)}`;
+  }
+
+  function rangeTotals(dayMetrics) {
+    const t = { cost: 0, revenue: 0, profit: 0 };
+    for (const m of Object.values(dayMetrics || {})) {
+      t.cost += m.cost || 0;
+      t.revenue += m.revenue || 0;
+      t.profit += m.profit || 0;
+    }
+    return t;
+  }
+
+  function rangeTagText() {
+    if (state.rangeMode === "custom" && state.customRange) return AAPF.rangeLabel(state.customRange.from, state.customRange.to);
+    return RANGE_LABELS[state.rangeMode] || "";
+  }
+
+  function syncKpiCards() {
+    if (state.rangeMode === "native" || !lastData?.range) return restoreKpiCards();
+    const totals = rangeTotals(lastData.dayMetrics);
+    const text = {
+      cost: kpiMoney(totals.cost),
+      revenue: kpiMoney(totals.revenue),
+      profit: kpiMoney(totals.profit),
+      margin: totals.revenue ? `${((totals.profit / totals.revenue) * 100).toFixed(2)}%` : "–",
+    };
+    const tag = rangeTagText();
+    for (const { key, value } of kpiCards()) {
+      const current = value.textContent.trim();
+      // Anything we didn't write is Apify's own figure: remember it so it can
+      // be put back (and shown in the tooltip).
+      if (current !== value.dataset.aapValue) value.dataset.aapOrig = current;
+      if (current !== text[key]) {
+        value.textContent = text[key];
+        value.dataset.aapValue = text[key];
+      }
+      value.title = `${tag} total. Apify's ${state.month ? AAPF.monthLabelLong(state.month) : "month"} figure: ${value.dataset.aapOrig}`;
+    }
+  }
+
+  function restoreKpiCards() {
+    for (const { value } of kpiCards()) {
+      if (value.dataset.aapOrig != null && value.textContent.trim() === value.dataset.aapValue) {
+        value.textContent = value.dataset.aapOrig;
+      }
+      delete value.dataset.aapOrig;
+      delete value.dataset.aapValue;
+      value.removeAttribute("title");
+    }
+  }
+
+  // ---- highlights panel -------------------------------------------------------
+  // Four small cards between the chart and the Console's Actor table, for
+  // the active range: top 3 by profit, top 3 by cost, top 3 and bottom 3 by
+  // success rate. Built from the per-day-per-Actor index already in memory,
+  // so it costs no requests. The panel's own Hide button turns it off; the
+  // popup's settings turn it back on (PREF_KEYS.highlights).
+  const HIGHLIGHTS_CLASS = "aap-highlights";
+  // Success-rate rankings ignore Actors with fewer runs than this in the
+  // range, so a single successful run can't top the list (or one failure
+  // bottom it).
+  const HIGHLIGHT_MIN_RUNS = 20;
+  const HIGHLIGHT_N = 3;
+
+  // The block Apify wraps the whole chart card in — its next sibling is the
+  // Actor table's card, and the parent spaces its children with a gap, so a
+  // panel inserted between them inherits the page's own rhythm.
+  function findHighlightsAnchor() {
+    return findChartWrapper()?.closest('[class*="StyledChartWrapper"]') || null;
+  }
+
+  function ensureHighlights() {
+    let panel = document.querySelector(`.${HIGHLIGHTS_CLASS}`);
+    if (!highlightsOn || !onInsightsRoute()) {
+      panel?.remove();
+      return;
+    }
+    const anchor = findHighlightsAnchor();
+    if (!anchor) return;
+    if (!panel || panel.previousElementSibling !== anchor) {
+      panel?.remove();
+      panel = document.createElement("section");
+      panel.className = HIGHLIGHTS_CLASS;
+      panel.dataset.sig = "";
+      anchor.insertAdjacentElement("afterend", panel);
+    }
+    renderHighlights(panel);
+  }
+
+  // Per-Actor totals over the days on screen.
+  function aggregateActors(daily) {
+    const totals = new Map();
+    for (const rows of Object.values(daily || {})) {
+      for (const r of rows) {
+        const t = totals.get(r.actorId) || { actorId: r.actorId, name: r.name, revenue: 0, cost: 0, profit: 0, runs: 0, succeeded: 0, results: 0 };
+        t.revenue += r.revenue || 0;
+        t.cost += r.cost || 0;
+        t.profit += r.profit || 0;
+        t.runs += r.runs || 0;
+        // Older cache records predate `succeeded`; reconstruct it from the
+        // day's rate so the range rate is still runs-weighted.
+        t.succeeded += r.succeeded ?? (r.successRate != null && r.runs ? r.successRate * r.runs : 0);
+        t.results += r.results || 0;
+        totals.set(r.actorId, t);
+      }
+    }
+    for (const t of totals.values()) t.successRate = t.runs ? t.succeeded / t.runs : null;
+    return [...totals.values()];
+  }
+
+  function computeHighlights(daily) {
+    const actors = aggregateActors(daily);
+    const byRuns = actors.filter((a) => a.runs >= HIGHLIGHT_MIN_RUNS && a.successRate != null);
+    const top = (arr, cmp) => [...arr].sort(cmp).slice(0, HIGHLIGHT_N);
+    return {
+      profit: top(actors.filter((a) => a.profit !== 0), (a, b) => b.profit - a.profit),
+      cost: top(actors.filter((a) => a.cost > 0), (a, b) => b.cost - a.cost),
+      topSuccess: top(byRuns, (a, b) => b.successRate - a.successRate || b.runs - a.runs),
+      bottomSuccess: top(byRuns, (a, b) => a.successRate - b.successRate || b.runs - a.runs),
+      qualified: byRuns.length,
+    };
+  }
+
+  const HIGHLIGHT_CARDS = [
+    { key: "profit", title: "Top profit", value: (a) => AAPF.money(a.profit), hint: (a) => `${AAPF.money(a.revenue)} revenue` },
+    { key: "cost", title: "Top cost", value: (a) => AAPF.money(a.cost), hint: (a) => `${AAPF.compact(a.runs)} runs` },
+    { key: "topSuccess", title: "Best success rate", value: (a) => AAPF.pct(a.successRate), hint: (a) => `${AAPF.compact(a.runs)} runs` },
+    { key: "bottomSuccess", title: "Worst success rate", value: (a) => AAPF.pct(a.successRate), hint: (a) => `${AAPF.compact(a.runs)} runs` },
+  ];
+
+  // The Actor's own Console icon; falls back to its chart colour dot for an
+  // Actor without a picture (or one cached before icons were stored).
+  function actorIconHtml(actorId) {
+    const url = iconByActorId.get(actorId);
+    if (url && /^https:\/\//.test(url)) {
+      return `<img class="aap-hl-icon" src="${escapeHtml(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
+    }
+    return `<span class="aap-hl-icon aap-hl-icon-dot"><span class="aap-tt-dot" style="background:${colorByActorId.get(actorId) || OTHER_COLOR}"></span></span>`;
+  }
+
+  function renderHighlights(panel) {
+    const d = lastData;
+    const range = d?.range;
+    const h = computeHighlights(d?.daily);
+    const months = d?.months || [];
+    const pending = d?.pendingMonths || [];
+    // Only touch the DOM when something visible changed — this runs on every
+    // poll tick, and rebuilding would swap the Hide button out from under a
+    // click.
+    const sig = JSON.stringify([range, h, !!d?.indexing, pending.length, months.length, [...colorByActorId.entries()], iconByActorId.size]);
+    if (panel.dataset.sig === sig) return;
+    panel.dataset.sig = sig;
+
+    const rangeText = range ? (range.from ? AAPF.rangeLabel(range.from, range.to) : "All time") : "";
+    let html = `<div class="aap-hl-head"><span class="aap-hl-title">Highlights</span><span class="aap-hl-range">${escapeHtml(rangeText)}</span>`;
+    html += `<button type="button" class="aap-hl-hide" title="Hide this panel. Turn it back on in the extension's settings.">Hide</button></div>`;
+
+    const empty = !h.profit.length && !h.cost.length && !h.topSuccess.length;
+    if (empty) {
+      html += `<div class="aap-hl-note">${d?.indexing ? "Indexing Actors…" : "No paid Actor activity in this range."}</div>`;
+    } else {
+      html += '<div class="aap-hl-grid">';
+      for (const card of HIGHLIGHT_CARDS) {
+        const rows = h[card.key];
+        html += `<div class="aap-hl-card"><div class="aap-hl-card-title">${card.title}</div>`;
+        if (!rows.length) {
+          const why = card.key.endsWith("Success") ? `No Actor with ${HIGHLIGHT_MIN_RUNS}+ runs yet.` : "Nothing yet.";
+          html += `<div class="aap-hl-note">${why}</div>`;
+        } else {
+          html += "<ol class=\"aap-hl-list\">";
+          for (const a of rows) {
+            html += `<li>${actorIconHtml(a.actorId)}<span class="aap-hl-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</span><span class="aap-hl-value">${card.value(a)}</span><span class="aap-hl-hint">${card.hint(a)}</span></li>`;
+          }
+          html += "</ol>";
+        }
+        html += "</div>";
+      }
+      html += "</div>";
+      if (d?.indexing) html += `<div class="aap-hl-foot">Indexing Actors… rankings will update.</div>`;
+      else if (pending.length) html += `<div class="aap-hl-foot">Actor breakdown covers ${months.length - pending.length} of ${months.length} months in this range (see "Load more" in the toolbar).</div>`;
+      else if (h.qualified === 0) html += `<div class="aap-hl-foot">Success-rate cards need an Actor with ${HIGHLIGHT_MIN_RUNS}+ runs.</div>`;
+    }
+    panel.innerHTML = html;
+    panel.querySelector(".aap-hl-hide").addEventListener("click", () => {
+      highlightsOn = false;
+      savePref({ [PREF_KEYS.highlights]: false });
+      ensureHighlights();
+    });
   }
 
   // ---- hover tooltip --------------------------------------------------------
@@ -904,6 +2145,7 @@
     { sort: "name", label: "Actor" },
     { sort: "revenue", label: "Revenue", fmt: (r) => AAPF.money(r.revenue || 0) },
     { sort: "cost", label: "Cost", fmt: (r) => AAPF.money(r.cost || 0) },
+    { sort: "profit", label: "Profit", fmt: (r) => AAPF.money(r.profit || 0) },
     { sort: "runs", label: "Runs", fmt: (r) => AAPF.compact(r.runs || 0) },
     { sort: "results", label: "Results", fmt: (r) => AAPF.compact(r.results || 0) },
   ];
@@ -956,8 +2198,8 @@
 
     const dm = (lastData.dayMetrics || {})[day];
     const metric = primaryMetric();
-    const metricDef = METRICS.find((m) => m.key === metric);
-    const headlineValue = metric === "revenue" ? AAPF.money(dm?.revenue ?? 0) : AAPF.compact(dm?.[metric] ?? 0);
+    const metricInfo = metricDef(metric);
+    const headlineValue = BAR_METRICS[metric] ? AAPF.money(dm?.[metric] ?? 0) : AAPF.compact(dm?.[metric] ?? 0);
 
     // Only a pinned tooltip has pointer-events, so this affordance would be
     // misleading (and inert) on a plain hover preview.
@@ -968,11 +2210,11 @@
     // Headline metric + value up top (matching Apify's own tooltip), date
     // just below it, then our fuller day/actor breakdown underneath.
     html += `<div class="aap-tt-header">`;
-    html += `<span class="aap-tt-dot" style="background:${metricDef.color}"></span>`;
-    html += `<span class="aap-tt-header-label">${metricDef.label}</span>`;
+    html += `<span class="aap-tt-dot" style="background:${metricInfo.color}"></span>`;
+    html += `<span class="aap-tt-header-label">${metricInfo.label}</span>`;
     html += `<span class="aap-tt-header-value">${headlineValue}</span>`;
     html += "</div>";
-    html += `<div class="aap-tt-date">${AAPF.shortDate(day)}</div>`;
+    html += `<div class="aap-tt-date">${AAPF.longDate(day)}</div>`;
     html += '<div class="aap-tt-stats">';
     html += `<span>Revenue <b>${AAPF.money(dm?.revenue ?? 0)}</b></span>`;
     html += `<span>Costs <b>${AAPF.money(dm?.cost ?? 0)}</b></span>`;
@@ -996,7 +2238,7 @@
         return sortDir * ((a[tooltipSort.key] || 0) - (b[tooltipSort.key] || 0));
       });
 
-      html += `<div class="aap-tt-subtitle">Top ${tooltipActorCount} Actors by ${METRICS.find((m) => m.key === metric).label}</div>`;
+      html += `<div class="aap-tt-subtitle">Top ${tooltipActorCount} Actors by ${metricInfo.label}</div>`;
       html += '<table class="aap-tt-table"><thead><tr>';
       for (const col of TOOLTIP_COLUMNS) {
         const isSortCol = tooltipSort.key === col.sort;
@@ -1014,10 +2256,12 @@
         html += "</tr>";
       }
       html += "</tbody></table>";
+    } else if ((lastData.indexedMonths || []).includes(monthOf(day))) {
+      html += `<div class="aap-tt-note">No paid Actor activity this day.</div>`;
     } else if (lastData.indexing) {
       html += `<div class="aap-tt-note">Indexing Actors… ${lastData.progress ? `${lastData.progress.done}/${lastData.progress.total}` : ""}</div>`;
     } else {
-      html += `<div class="aap-tt-note">No paid Actor activity this day.</div>`;
+      html += `<div class="aap-tt-note">Actor breakdown not loaded for this month yet, see "Load more" in the toolbar.</div>`;
     }
     tooltip.innerHTML = html;
     tooltip.style.display = "block";

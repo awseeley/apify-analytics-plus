@@ -32,29 +32,49 @@
     return `${BASE}/${path}?${qs.toString()}`;
   }
 
+  // Network-level failures (fetch rejects with TypeError: offline, DNS/TLS
+  // hiccup, connection reset) get a couple of short retries; an HTTP error
+  // status does not — the backend answered, retrying won't change it.
+  const NETWORK_RETRIES = 2;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
   async function req(path, params) {
     await ready();
-    const res = await fetch(buildUrl(path, params), {
-      headers: {
-        Authorization: token,
-        Accept: "application/json",
-        "x-idempotency-key": crypto.randomUUID(),
-      },
-    });
-    if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
-    return res.json();
+    const url = buildUrl(path, params);
+    for (let attempt = 0; ; attempt++) {
+      let res;
+      try {
+        res = await fetch(url, {
+          headers: {
+            Authorization: token,
+            Accept: "application/json",
+            "x-idempotency-key": crypto.randomUUID(),
+          },
+        });
+      } catch (err) {
+        if (attempt >= NETWORK_RETRIES) throw err;
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+      if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+      return res.json();
+    }
   }
 
   // Runs `items.map(fn)` with at most MAX_CONCURRENT in flight, reporting
   // progress via onProgress(done, total). Never throws for a single item
   // failure — that item's result is `null` so one bad actor doesn't sink the
-  // whole indexing pass.
-  async function pooled(items, fn, onProgress) {
+  // whole indexing pass. `shouldStop()` is checked before each item so a
+  // pass that's been superseded (the user switched month/range mid-index)
+  // stops spending requests instead of finishing a result nobody will use;
+  // unstarted items are left `undefined`.
+  async function pooled(items, fn, onProgress, shouldStop) {
     const results = new Array(items.length);
     let next = 0;
     let done = 0;
     async function worker() {
       while (next < items.length) {
+        if (shouldStop && shouldStop()) return;
         const i = next++;
         try {
           results[i] = await fn(items[i], i);

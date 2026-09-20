@@ -23,6 +23,16 @@ const BROWSER_PATCHES = {
   chrome: {},
   edge: {},
   firefox: {
+    // Firefox runs MV3 background as an event page: it needs
+    // `background.scripts`, and AMO's validator rejects a manifest that has
+    // only `service_worker` (no Firefox-compatible fallback). Declaring both
+    // is allowed: Chrome/Edge ignore `scripts`, Firefox ignores
+    // `service_worker`. background.js uses only chrome.runtime/fetch, which
+    // work identically in both models.
+    background: {
+      service_worker: "background.js",
+      scripts: ["background.js"],
+    },
     browser_specific_settings: {
       gecko: {
         id: "apify-analytics-plus@apifyhub.com",

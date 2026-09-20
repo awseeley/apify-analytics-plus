@@ -1,10 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Apify Analytics Plus",
-  "version": "0.1.8",
+  "version": "0.3.2",
   "description": "Adds a per-Actor daily breakdown to the Apify Console Monetization insights page — click a day to see which Actors drove it.",
-  "permissions": ["storage"],
-  "host_permissions": ["https://console-backend.apify.com/*"],
+  "permissions": [
+    "storage",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://*.convex.site/*",
+    "https://console-backend.apify.com/*"
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -21,16 +27,33 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://console.apify.com/*"],
-      "js": ["content/token-sniffer.js"],
+      "matches": [
+        "https://console.apify.com/*"
+      ],
+      "js": [
+        "content/token-sniffer.js"
+      ],
       "world": "MAIN",
       "run_at": "document_start"
     },
     {
-      "matches": ["https://console.apify.com/*"],
-      "js": ["lib/format.js", "lib/api.js", "lib/cache.js", "content/app.js"],
-      "css": ["content/app.css"],
+      "matches": [
+        "https://console.apify.com/*"
+      ],
+      "js": [
+        "lib/format.js",
+        "lib/api.js",
+        "lib/cache.js",
+        "lib/hub.js",
+        "content/app.js"
+      ],
+      "css": [
+        "content/app.css"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
 }
