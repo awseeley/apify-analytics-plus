@@ -117,9 +117,11 @@ The Apify API never tells a developer what a **customer's** run cost them
 Apify Hub dashboard can only estimate platform cost. This page has the real
 numbers. With a hub key saved in the popup's settings, the extension POSTs
 each month's per-day-per-actor matrix (cost, revenue, profit, runs, results)
-plus the per-actor month totals to `<hub>/v1/insights-ingest`, and Apify Hub's
-developer setting "Use actual Apify cost from Insights" swaps the estimate for
-these figures.
+plus the per-actor month totals to `<hub>/v1/insights-ingest`. Apify Hub uses
+those figures in place of its estimate wherever it has a row, with nothing to
+switch on; Profile → Beta shows what has been imported. (The dashboard's own
+"Show Apify platform cost" preference still decides whether Apify cost is
+counted at all.)
 
 - Settings (popup → gear): the hub key (`pk_…`, from Apify Hub → Profile →
   API keys) and nothing else. There is no endpoint field and no auto-sync

@@ -95,12 +95,30 @@
   // exists, so there is nothing else here to get wrong.
   const HUB = {
     key: "aap.hub.key",
+    endpoint: "aap.hub.endpoint",
     lastSync: "aap.hub.lastSync",
   };
+  const HUB_DEFAULT_ENDPOINT = "https://notable-toad-601.convex.site";
   const HUB_MONTHS_SHOWN = 6;
   const hubKey = document.getElementById("hub-key");
   const hubMonths = document.getElementById("hub-months");
   const hubStatus = document.getElementById("hub-status");
+  const hubEndpointNote = document.getElementById("hub-endpoint-note");
+  const hubEndpointHost = document.getElementById("hub-endpoint-host");
+
+  // There is no endpoint field: the hub URL is fixed and a local hub sets
+  // aap.hub.endpoint from the service worker console. But an override left
+  // behind after local work silently sends every sync somewhere that isn't
+  // running, so when one exists it shows here with a way out.
+  function renderHubEndpoint(endpoint) {
+    const custom = endpoint && endpoint.replace(/\/+$/, "") !== HUB_DEFAULT_ENDPOINT;
+    hubEndpointNote.hidden = !custom;
+    if (custom) hubEndpointHost.textContent = endpoint;
+  }
+  document.getElementById("hub-endpoint-reset").addEventListener("click", () => {
+    chrome.storage.local.remove(HUB.endpoint);
+    renderHubEndpoint(null);
+  });
 
   function renderHubStatus(lastSync) {
     const entries = Object.entries(lastSync || {}).sort((a, b) => b[0].localeCompare(a[0]));
@@ -129,8 +147,9 @@
       `${hidden ? ` (${hidden} older not shown)` : ""}${last ? ` · last ${last}` : ""}`;
   }
 
-  chrome.storage.local.get([HUB.key, HUB.lastSync]).then((r) => {
+  chrome.storage.local.get([HUB.key, HUB.endpoint, HUB.lastSync]).then((r) => {
     hubKey.value = r[HUB.key] || "";
+    renderHubEndpoint(r[HUB.endpoint]);
     renderHubStatus(r[HUB.lastSync]);
   });
   hubKey.addEventListener("change", () => {

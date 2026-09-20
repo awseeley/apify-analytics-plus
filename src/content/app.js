@@ -1038,6 +1038,7 @@
       const records = await AAP_HUB.lastSync();
       let synced = 0;
       let failed = null;
+      let failures = 0;
       let incomplete = false; // a month this pass couldn't derive or push
       for (const m of months) {
         if (!alive()) return;
@@ -1058,8 +1059,12 @@
           await AAP_HUB.markEmpty(m);
           continue;
         }
-        setHubStatus(`Apify Hub: syncing ${AAPF.monthLabel(m)}…`);
-        const md = await hubBreakdown(m, scope, dayMetrics, alive);
+        const left = months.length - months.indexOf(m) - 1;
+        const tail = left > 0 ? `, ${left} older month${left === 1 ? "" : "s"} to go` : "";
+        setHubStatus(`Apify Hub: syncing ${AAPF.monthLabel(m)}…${tail}`);
+        const md = await hubBreakdown(m, scope, dayMetrics, alive, (done, total) => {
+          setHubStatus(`Apify Hub: indexing ${AAPF.monthLabel(m)}… ${done}/${total}${tail}`);
+        });
         if (!alive()) return;
         if (!md) {
           incomplete = true; // partial index; don't push an undercount
@@ -1067,17 +1072,26 @@
         }
         const r = await AAP_HUB.send(m, md.daily, dayMetrics, md.breakdown, { skipUnchanged: !force });
         if (r.skipped && !r.unchanged) return void setHubStatus(""); // key removed mid-walk
+        // One month failing (a blip, a moment of hub downtime) is no reason to
+        // strand the twenty behind it: note it, keep walking, and let the next
+        // pass retry what didn't land.
         if (!r.ok) {
           failed = r;
-          break;
+          failures++;
+          continue;
         }
         if (!r.unchanged) synced++;
       }
       if (!alive()) return;
       completed = !failed && !incomplete;
-      if (failed) setHubStatus(`✗ Apify Hub: ${failed.message}`);
-      else if (synced) setHubStatus(`✓ Apify Hub: synced ${synced} month${synced === 1 ? "" : "s"}`);
-      else setHubStatus("✓ Apify Hub: up to date");
+      const done = synced ? `synced ${synced} month${synced === 1 ? "" : "s"}` : "up to date";
+      if (failed) {
+        setHubStatus(`✗ Apify Hub: ${failures} month${failures === 1 ? "" : "s"} failed (${failed.message})`);
+      } else if (incomplete) {
+        setHubStatus(`✓ Apify Hub: ${done}, retrying the rest on the next load`);
+      } else {
+        setHubStatus(`✓ Apify Hub: ${done}`);
+      }
     } catch (err) {
       if (isInvalidated(err)) return retireOrphan();
       setHubStatus(`✗ Apify Hub: ${describeError(err)}`);
@@ -1123,7 +1137,7 @@
   // The per-Actor breakdown for one month for the backfill: cache if fresh,
   // otherwise a full index. Returns null if the index came back partial (a
   // pushed undercount would look like a real drop in the hub).
-  async function hubBreakdown(month, scope, dayMetrics, alive) {
+  async function hubBreakdown(month, scope, dayMetrics, alive, onProgress) {
     const inMemory = monthDataScope === scope ? monthData[month] : null;
     if (inMemory?.complete && !isCurrentMonth(month)) return inMemory;
     const cached = await AAP_CACHE.get(month, scope);
@@ -1131,7 +1145,7 @@
       cached && !cached.stale && !(isCurrentMonth(month) && breakdownMissingRevenueDay(cached.daily, dayMetrics));
     if (usable) return { daily: cached.daily, breakdown: cached.breakdown || null, complete: true };
     if (!alive()) return null;
-    const r = await indexMonth(month, [], scope, dayMetrics, null, () => !alive());
+    const r = await indexMonth(month, [], scope, dayMetrics, onProgress || null, () => !alive());
     return r.complete ? r : null;
   }
 
@@ -1441,7 +1455,12 @@
       }
     }
     const first = firstSeen || monthOf(todayUtc());
-    await AAP_CACHE.setFirstMonth(org, first);
+    // Only remember a month activity was actually seen in. The fallback is a
+    // guess made when every probe came back empty — a brand new account, but
+    // equally a run of failed probes — and this record never expires, so
+    // caching it would pin "All time" (and the hub's history walk) to the
+    // current month for good.
+    if (firstSeen) await AAP_CACHE.setFirstMonth(org, first);
     return first;
   }
 

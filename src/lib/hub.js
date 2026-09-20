@@ -131,6 +131,26 @@
     return `${body.days.length}/${body.actors.length}/${cost.toFixed(4)}/${revenue.toFixed(4)}/${runs}`;
   }
 
+
+  // A fetch that never reached a server (status 0) says nothing useful on its
+  // own — "Failed to fetch" covers DNS, a refused connection and a blocked
+  // cross-origin request alike. Name the host, and say when it's a leftover
+  // dev override rather than the real hub, since that's the usual cause and
+  // there is no endpoint field to notice it in.
+  function failureMessage(resp, endpoint) {
+    const status = resp ? resp.status : 0;
+    const text = resp ? resp.text : "no response";
+    if (status) return `HTTP ${status}: ${text}`;
+    let host = endpoint;
+    try {
+      host = new URL(endpoint).host;
+    } catch {
+      /* keep the raw string */
+    }
+    const override = endpoint !== DEFAULT_ENDPOINT ? ". A custom endpoint is set; reset it in the popup" : "";
+    return `couldn't reach ${host} (${text})${override}`;
+  }
+
   // month is "YYYY-MM-01" (the page's param) or "YYYY-MM".
   function monthKey(month) {
     return String(month).slice(0, 7);
@@ -187,7 +207,7 @@
       covered,
       message: ok
         ? `synced ${body.days.length} day rows, ${body.actors.length} actors${covered === false ? " (stored; no runs ingested yet)" : ""}`
-        : `HTTP ${resp ? resp.status : "?"}: ${resp ? resp.text : "no response"}`,
+        : failureMessage(resp, s.endpoint),
     };
     await writeLastSync(body.month, result);
     return result;
