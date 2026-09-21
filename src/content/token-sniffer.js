@@ -94,4 +94,51 @@
   window.addEventListener("aap-request-token", () => {
     if (lastToken) dispatchToken(lastToken);
   });
+
+  // ---- API bridge -------------------------------------------------------
+  // The isolated content script used to call console-backend.apify.com with
+  // its own `fetch`, which meant the manifest had to request a host
+  // permission for that origin (a content script's cross-origin fetch is
+  // otherwise blocked by CORS). Running the fetch here instead sends it as
+  // an ordinary `https://console.apify.com` request — byte for byte the kind
+  // of call the page itself makes to that backend, and one it already allows
+  // — so the extension needs no host permission at all. lib/api.js hands us
+  // a URL, we hand back the raw response text.
+  const CALL_EVENT = "aap-api-call";
+  const RESULT_EVENT = "aap-api-result";
+  const ALLOWED_URL = /^https:\/\/console-backend\.apify\.com\/actor-analytics\//;
+
+  function reply(id, payload) {
+    window.dispatchEvent(new CustomEvent(RESULT_EVENT, { detail: Object.assign({ id }, payload) }));
+  }
+
+  window.addEventListener(CALL_EVENT, (event) => {
+    const { id, url } = (event && event.detail) || {};
+    if (!id || typeof url !== "string") return;
+    // The page shares this window, so anything could fire this event. Only
+    // ever speak to the one backend path family, and only with the token the
+    // page was already using.
+    if (!ALLOWED_URL.test(url)) return reply(id, { error: "blocked" });
+    if (!lastToken) return reply(id, { error: "no-token" });
+
+    // OrigFetch, not window.fetch: our own request is not one of the page's,
+    // so it has no business going through the sniffer above.
+    OrigFetch.call(
+      window,
+      url,
+      {
+        headers: {
+          Authorization: lastToken,
+          Accept: "application/json",
+          "x-idempotency-key": crypto.randomUUID(),
+        },
+      }
+    )
+      .then((res) =>
+        res.ok
+          ? res.text().then((body) => reply(id, { ok: true, body }))
+          : reply(id, { ok: false, status: res.status })
+      )
+      .catch(() => reply(id, { error: "network" }));
+  });
 })();

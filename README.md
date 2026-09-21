@@ -61,6 +61,17 @@ over a `CustomEvent`. The token is only ever used to call this same
 first-party endpoint, for the same logged-in user, from this same browser —
 it's never persisted or sent anywhere else.
 
+**No host permission (0.3.4+):** the requests themselves are issued by
+`token-sniffer.js` too, from the page's own world, so they leave the browser
+as ordinary `https://console.apify.com` calls — indistinguishable in origin
+from the ones the Console makes to that backend itself. `lib/api.js` builds a
+URL, passes it over a `CustomEvent`, and gets the raw response body back the
+same way. Only an isolated-world fetch would have needed a
+`host_permissions` grant for `console-backend.apify.com`, and there isn't
+one any more: the extension now asks for `storage` and nothing else. The
+bridge only ever accepts `console-backend.apify.com/actor-analytics/*` URLs,
+since the page shares that event target.
+
 ## Date ranges (0.3.0+)
 
 Pills styled like the Console's own controls, mounted right after its month
@@ -127,7 +138,9 @@ every user was asked to grant an outbound host they would probably never use.
 That was the wrong trade. As of 0.3.3 the sync, its host permission, its
 background service worker and the popup's key field are gone. The only host
 this extension talks to is `console-backend.apify.com`, Apify's own backend,
-for the user who is already logged into it. On upgrade the popup clears the
+for the user who is already logged into it — and as of 0.3.4 it reaches that
+backend from the page's own origin, so it declares no host permissions at
+all. On upgrade the popup clears the
 `aap.hub.*` keys the old version left in `chrome.storage.local`.
 
 ## Architecture
@@ -135,14 +148,16 @@ for the user who is already logged into it. On upgrade the popup clears the
 ```
 src/
   manifest.json               MV3 manifest (two content-script worlds + popup;
-                               no background worker, one host permission)
+                               no background worker, no host permissions)
   content/token-sniffer.js    MAIN world, document_start: sniffs the bearer
                                token + the `month`/`actorIds[]` of every
-                               actor-analytics request the page makes
+                               actor-analytics request the page makes, and
+                               issues our own calls from the page's origin
   content/app.js               isolated world: renders the panel, drives the
                                indexing pass, owns the click-a-day UI
   content/app.css
-  lib/api.js                  actor-analytics fetch client + a small
+  lib/api.js                  actor-analytics client (URLs + retries; the
+                               fetch happens in the MAIN world) + a small
                                concurrency-limited pool for the per-Actor pass
   lib/cache.js                chrome.storage.local cache: per-month day
                                totals + per-Actor breakdown + first month

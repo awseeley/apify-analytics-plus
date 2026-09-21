@@ -68,6 +68,11 @@ key field are all gone. This version talks to exactly one host,
 console-backend.apify.com, which is Apify's own backend, using the session
 you are already logged into. Nothing else is contacted. If you had a key
 saved, the popup deletes it from local storage on upgrade.
+
+0.3.4 goes one step further and requests no host permissions whatsoever:
+those first-party calls are now made from the Console page's own context, so
+they need no separate grant. The extension asks for local storage, and that
+is all.
 ```
 
 ## Images
@@ -91,18 +96,19 @@ Monetization insights page.
 - `storage` — caches the computed per-Actor daily breakdown locally for 15
   minutes so revisiting the Insights page doesn't refetch, and remembers the
   user's chart toggle preferences.
-- Host permission `https://console-backend.apify.com/*` — the extension
-  fetches the same first-party actor-analytics endpoints
-  (`actor-breakdown`, `profit-margin`, `run-statistics`) the Console page
-  itself calls, scoped per Actor, to build the per-day breakdown. This is
-  the extension's single data source, and as of 0.3.3 the only host the
-  extension is permitted to contact at all.
+- Host permissions — none. 0.3.4 removed the last one
+  (`https://console-backend.apify.com/*`): the extension's requests to that
+  first-party backend are now issued from the Console page's own JavaScript
+  context, so they carry the console.apify.com origin exactly as the page's
+  own calls to it do, and no cross-origin grant is needed.
 - Content scripts on `https://console.apify.com/*` — one script renders the
   breakdown panel on the Monetization insights page; a second (MAIN world)
   observes the Authorization header the Console attaches to its own
-  analytics requests so the extension can call the same first-party API as
-  the same logged-in user. The token is held in memory only, never
-  persisted, and never sent anywhere except `console-backend.apify.com`.
+  analytics requests, then reuses it to call the same first-party
+  actor-analytics endpoints (`actor-breakdown`, `profit-margin`,
+  `run-statistics`) scoped per Actor. Those calls are the extension's single
+  data source. The token is held in memory only, never persisted, and never
+  sent anywhere except `console-backend.apify.com`.
 
 **Remote code:** No, I am not using remote code. (All JS is packaged; no
 eval, no CDN scripts.)
