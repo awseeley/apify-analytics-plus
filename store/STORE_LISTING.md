@@ -12,7 +12,7 @@ Upload package: `dist/apify-analytics-plus-chrome.zip` (rebuild with
 **Name:** Apify Analytics Plus
 
 **Summary (132 chars max):**
-Per-Actor daily revenue breakdown for the Apify Console — hover any day to see which Actors drove it.
+Per-Actor daily revenue breakdown for the Apify Console. Hover any day to see which Actors drove it.
 
 **Category:** Developer Tools
 
@@ -21,19 +21,19 @@ Per-Actor daily revenue breakdown for the Apify Console — hover any day to see
 **Description:**
 
 ```
-See which Actors drove each day's revenue — right inside the Apify Console.
+See which Actors drove each day's revenue, right inside the Apify Console.
 
 The Console's Monetization insights page shows account-wide revenue per day,
-and per-Actor totals for the whole month — but never both at once. Apify
+and per-Actor totals for the whole month, but never both at once. Apify
 Analytics Plus fills that gap with a richer chart, drawn in place of the
 native one:
 
 • Hover any day for that day's revenue, costs, profit, margin, runs, results
-  and success rate — plus a top-10 table of the Actors that drove it.
+  and success rate, plus a top-10 table of the Actors that drove it.
 • Stack the revenue bars by Actor to see composition at a glance, with
   stable per-Actor colors across the whole month.
 • Overlay Runs and Results trend lines, each on its own axis.
-• Follows the Console's native Actor filter — filter to one Actor and every
+• Follows the Console's native Actor filter. Filter to one Actor and every
   number scopes to it.
 • Flip back to the original Apify chart at any time with one checkbox.
 
@@ -47,6 +47,27 @@ Apify's own analytics backend, using the session the Console page already
 has. Nothing is collected, stored remotely, or sent to any third party.
 
 Not affiliated with or endorsed by Apify.
+```
+
+## Release notes (0.3.3)
+
+Paste into the "What's new" / release-notes field on each store.
+
+```
+0.3.3 removes the optional Apify Hub sync and the host permission it needed.
+
+Earlier versions could send derived per-Actor revenue and cost totals to an
+Apify Hub ingest endpoint, but only if you pasted a hub key into the popup.
+No key meant no request. Even so, the manifest declared the outbound host
+permission for everyone at install time, including the large majority who
+never used the feature, and a permission you have to take on trust is worse
+than a feature you can live without.
+
+The sync, its host permission, its background service worker and the popup's
+key field are all gone. This version talks to exactly one host,
+console-backend.apify.com, which is Apify's own backend, using the session
+you are already logged into. Nothing else is contacted. If you had a key
+saved, the popup deletes it from local storage on upgrade.
 ```
 
 ## Images
@@ -74,7 +95,8 @@ Monetization insights page.
   fetches the same first-party actor-analytics endpoints
   (`actor-breakdown`, `profit-margin`, `run-statistics`) the Console page
   itself calls, scoped per Actor, to build the per-day breakdown. This is
-  the extension's single data source.
+  the extension's single data source, and as of 0.3.3 the only host the
+  extension is permitted to contact at all.
 - Content scripts on `https://console.apify.com/*` — one script renders the
   breakdown panel on the Monetization insights page; a second (MAIN world)
   observes the Authorization header the Console attaches to its own

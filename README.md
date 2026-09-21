@@ -41,8 +41,7 @@ flight; a cold month costs 3 account-wide calls plus 2 per paid Actor; a warm
 one costs 0 (past month) or 2 (current month). Only the current month is
 refreshed while the tab stays open (day totals every 60 s, a full re-index
 every 15 min), past months never are, and a background (hidden) tab does
-nothing at all. The Apify Hub sync adds no Apify requests; it reuses the
-data already fetched.
+nothing at all.
 
 **Auth:** these endpoints require the same bearer token the Console's own
 API client already attaches to its requests (there's no session cookie on
@@ -110,47 +109,26 @@ left out of the success-rate cards). Rows show the Actor's own Console icon
 index already in memory, so it adds no requests. The panel's Hide button turns it off;
 the popup's Settings turn it back on.
 
-## Apify Hub sync (optional, 0.2.0+)
+## No data leaves your browser (0.3.3+)
 
-The Apify API never tells a developer what a **customer's** run cost them
-(`usageUsd` is redacted, `usageTotalUsd` is the customer's charge), so the
-Apify Hub dashboard can only estimate platform cost. This page has the real
-numbers. With a hub key saved in the popup's settings, the extension POSTs
-each month's per-day-per-actor matrix (cost, revenue, profit, runs, results)
-plus the per-actor month totals to `<hub>/v1/insights-ingest`. Apify Hub uses
-those figures in place of its estimate wherever it has a row, with nothing to
-switch on; Profile → Beta shows what has been imported. (The dashboard's own
-"Show Apify platform cost" preference still decides whether Apify cost is
-counted at all.)
+Versions 0.2.0 through 0.3.2 could POST derived per-Actor cost/revenue/profit
+figures to an Apify Hub ingest endpoint on `*.convex.site`. It was opt-in (no
+request was ever made without a hub key pasted into the popup), but the
+manifest still declared the host permission at install time for everyone, so
+every user was asked to grant an outbound host they would probably never use.
 
-- Settings (popup → gear): the hub key (`pk_…`, from Apify Hub → Profile →
-  API keys) and nothing else. There is no endpoint field and no auto-sync
-  toggle: a key means sync. For a local hub, write the dev deployment's
-  `*.convex.site` URL into `aap.hub.endpoint` from the service worker
-  console (`chrome.storage.local.set({"aap.hub.endpoint": "https://…"})`).
-- Coverage is the whole account, not the month on screen: after the on-screen
-  range loads, the extension walks every month from the account's first with
-  activity to today (day totals + breakdown from cache where they're fresh,
-  indexed where they aren't) and pushes each one. Months with no activity are
-  recorded locally and never pushed; a month whose numbers match the last
-  successful push is skipped without a request, so the walk is free after the
-  first pass. It runs once per account per page session; the "Sync to Apify
-  Hub" toolbar button repeats it and forces a re-push of every month.
-- A partial index is never pushed — an undercounted month would read as a
-  real drop in the hub. Re-syncing upserts, so current-month numbers that
-  still move are safe to push again.
-- Apify Hub stores every month it is sent but only *shows* the days it has
-  ingested runs of its own for (the import can reach back years before the
-  SDK was installed); see its profile → Beta card for the covered range.
-- Only derived numbers leave the browser. The Console token is never sent.
-- Cross-origin POSTs go through `background.js` (`host_permissions:
-  *.convex.site`), since content scripts are bound by the page's CORS.
+That was the wrong trade. As of 0.3.3 the sync, its host permission, its
+background service worker and the popup's key field are gone. The only host
+this extension talks to is `console-backend.apify.com`, Apify's own backend,
+for the user who is already logged into it. On upgrade the popup clears the
+`aap.hub.*` keys the old version left in `chrome.storage.local`.
 
 ## Architecture
 
 ```
 src/
-  manifest.json               MV3 manifest (two content-script worlds + popup)
+  manifest.json               MV3 manifest (two content-script worlds + popup;
+                               no background worker, one host permission)
   content/token-sniffer.js    MAIN world, document_start: sniffs the bearer
                                token + the `month`/`actorIds[]` of every
                                actor-analytics request the page makes
@@ -161,12 +139,10 @@ src/
                                concurrency-limited pool for the per-Actor pass
   lib/cache.js                chrome.storage.local cache: per-month day
                                totals + per-Actor breakdown + first month
-  lib/hub.js                  Apify Hub sync: settings, payload, POST via bg
-  background.js               service worker relaying hub POSTs (CORS)
   lib/format.js                money / percent / date helpers
   popup/*                     shows cached months, "clear cache" button
                                (also resets the cached "All time" start)
-build.mjs                     emits dist/chrome and dist/edge
+build.mjs                     emits dist/chrome, dist/edge and dist/firefox
 ```
 
 ## Build & load

@@ -72,32 +72,6 @@
       </button>
 
       <section class="card">
-        <div class="card-title">Apify Hub sync</div>
-        <p class="blurb">
-          Optional. Pushes your per-Actor cost, revenue and profit to your
-          Apify Hub account so its analytics can show your <strong>actual
-          Apify cost</strong>. Paste the hub key from
-          <em>Apify Hub → Profile → API keys</em>. Your Console session token
-          is never sent; only the numbers on this page are.
-        </p>
-        <label class="field">
-          <span>Apify Hub key</span>
-          <input id="hub-key" type="password" placeholder="pk_…" autocomplete="off" />
-        </label>
-        <div class="field-hint">
-          With a key saved, every month of your account's history syncs on its
-          own while the Insights page is open. Apify Hub shows those numbers
-          only for the days it also has run data for.
-        </div>
-        <div id="hub-endpoint-note" class="field-hint" hidden>
-          Sending to <code id="hub-endpoint-host"></code> instead of Apify Hub.
-          <button id="hub-endpoint-reset" class="link-button" type="button">Use the default</button>
-        </div>
-        <div id="hub-months" class="hub-months"></div>
-        <div id="hub-status" class="field-hint"></div>
-      </section>
-
-      <section class="card">
         <div class="card-title">Settings</div>
         <label class="field field-inline">
           <input id="highlights-on" type="checkbox" />

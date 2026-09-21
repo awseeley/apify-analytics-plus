@@ -145,5 +145,3 @@ body {
   border: 1px solid #31384d;
   border-radius: 6px;
 }
-.hub-months { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; color: #d3d6e0; }
-.hub-months .cache-row span:last-child { color: #8c93a8; }

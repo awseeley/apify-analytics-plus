@@ -23,16 +23,9 @@ const BROWSER_PATCHES = {
   chrome: {},
   edge: {},
   firefox: {
-    // Firefox runs MV3 background as an event page: it needs
-    // `background.scripts`, and AMO's validator rejects a manifest that has
-    // only `service_worker` (no Firefox-compatible fallback). Declaring both
-    // is allowed: Chrome/Edge ignore `scripts`, Firefox ignores
-    // `service_worker`. background.js uses only chrome.runtime/fetch, which
-    // work identically in both models.
-    background: {
-      service_worker: "background.js",
-      scripts: ["background.js"],
-    },
+    // No background script since 0.3.3 (it existed only to relay hub syncs),
+    // so there is nothing here to reconcile between Chrome's service worker
+    // and Firefox's event page.
     browser_specific_settings: {
       gecko: {
         id: "apify-analytics-plus@apifyhub.com",
@@ -40,8 +33,8 @@ const BROWSER_PATCHES = {
         strict_min_version: "128.0",
         // AMO rejects new submissions without this declaration. "none" =
         // nothing is collected or transmitted to the developer or third
-        // parties — all data stays in the browser / goes only to Apify's
-        // own first-party backend.
+        // parties. True as of 0.3.3: the only network calls are to Apify's
+        // own first-party backend, for the user who is already logged in.
         data_collection_permissions: {
           required: ["none"],
         },

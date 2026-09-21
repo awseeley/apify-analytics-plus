@@ -542,32 +542,6 @@
     status.className = "aap-status";
     toolbar.appendChild(status);
 
-    // Apify Hub sync button — only rendered once a hub key is configured in
-    // the popup, so users who never set one up see no change.
-    const hubBtn = document.createElement("button");
-    hubBtn.type = "button";
-    hubBtn.className = "aap-hub-button";
-    hubBtn.textContent = "Sync to Apify Hub";
-    hubBtn.title = "Push every month of this account's history to Apify Hub, re-sending months it already has.";
-    hubBtn.hidden = true;
-    hubBtn.addEventListener("click", () => void hubBackfill(true));
-    toolbar.appendChild(hubBtn);
-    const hubStatus = document.createElement("span");
-    hubStatus.className = "aap-hub-status";
-    toolbar.appendChild(hubStatus);
-    AAP_HUB.settings()
-      .then((hub) => {
-        hubBtn.hidden = !hub.key;
-      })
-      .catch(() => {});
-    if (contextAlive()) {
-      chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === "local" && changes[AAP_HUB.KEYS.key]) {
-          hubBtn.hidden = !changes[AAP_HUB.KEYS.key].newValue;
-        }
-      });
-    }
-
     wrapper.insertAdjacentElement("beforebegin", container);
     syncToolbar();
     return container;
@@ -960,10 +934,6 @@
   let dayMetricsFetchedAt = 0;
   let dayMetricsFetching = false;
   let breakdownRefreshedAt = 0;
-  let hubQueue = Promise.resolve(); // hub syncs run one at a time, never dropped
-  // Cache scope the automatic history walk has already run for this page
-  // session (see hubBackfill); the toolbar button ignores it.
-  let hubBackfillDoneFor = null;
   // Everything loaded so far for the current cache scope (org + filter),
   // per month: { dayMetrics, daily, actorCount, breakdown, indexedAt,
   // complete }. Range views are assembled from this by publish(); switching
@@ -973,186 +943,6 @@
   let monthDataScope = null;
   // The scope key the user asked to index past AUTO_INDEX_MONTHS for.
   let indexAllFor = null;
-
-  // Push the account's history to Apify Hub (see lib/hub.js). Apify Hub can
-  // only reconcile a day it was given, so once a key is configured the whole
-  // history is offered — not just the months on screen — and a month whose
-  // numbers haven't moved since the last push costs no request at all. The
-  // toolbar button forces a re-push (recovery after the hub loses rows);
-  // everything automatic skips unchanged months.
-  function syncToHub(reason, onlyMonth) {
-    hubQueue = hubQueue.then(() => doSyncToHub(reason, onlyMonth)).catch(() => {});
-    return hubQueue;
-  }
-
-  // One month, from what's already in monthData (a just-indexed month, or the
-  // current month after a re-index).
-  async function doSyncToHub(reason, onlyMonth) {
-    if (!lastData) return;
-    const months = (onlyMonth ? [onlyMonth] : lastData.months || []).filter((m) => monthData[m]?.daily);
-    if (!months.length) return;
-    try {
-      let last = null;
-      for (const m of months) {
-        const md = monthData[m];
-        last = await AAP_HUB.send(m, md.daily, md.dayMetrics, md.breakdown || null, { skipUnchanged: true });
-        if (last.skipped && !last.unchanged) return void setHubStatus("");
-        if (!last.ok) break;
-      }
-      if (last && !last.ok) setHubStatus(`✗ Apify Hub: ${last.message}`);
-      else if (last && !last.unchanged) setHubStatus(`✓ Apify Hub: ${last.message}`);
-    } catch (err) {
-      if (isInvalidated(err)) return retireOrphan();
-      setHubStatus(`✗ Apify Hub: ${String(err && err.message ? err.message : err)}`);
-    }
-  }
-
-  // Every month from the account's first with activity up to today, whether
-  // or not the current range covers it: day totals + per-Actor breakdown from
-  // cache where they're fresh, fetched/indexed where they aren't, then pushed.
-  // Runs on the hub queue (one month at a time, never concurrent with a
-  // single-month sync) and gives up the moment the scope changes under it.
-  function hubBackfill(force) {
-    hubQueue = hubQueue.then(() => doHubBackfill(force)).catch(() => {});
-    return hubQueue;
-  }
-
-  async function doHubBackfill(force) {
-    const hub = await AAP_HUB.settings();
-    if (!hub.key) return;
-    // A native Actor filter narrows every request to those Actors, so the
-    // numbers aren't the account's. Wait for an unfiltered view.
-    if (state.actorIds.length) return;
-    const org = currentOrg();
-    const scope = cacheScope([]);
-    const alive = () => contextAlive() && currentOrg() === org && state.actorIds.length === 0;
-    if (!force && hubBackfillDoneFor === scope) return;
-    hubBackfillDoneFor = scope; // claimed, so a re-render can't start a second walk
-    let completed = false;
-    try {
-      setHubStatus("Apify Hub: checking history…");
-      const first = state.firstMonth[org] || (await resolveFirstMonth(() => !alive(), { quiet: true }));
-      if (!alive() || !first) return;
-      state.firstMonth[org] = first;
-      const months = monthsBetween(first, todayUtc()); // newest first
-      const records = await AAP_HUB.lastSync();
-      let synced = 0;
-      let failed = null;
-      let failures = 0;
-      let incomplete = false; // a month this pass couldn't derive or push
-      for (const m of months) {
-        if (!alive()) return;
-        const key = AAP_HUB.monthKey(m);
-        const rec = records[key];
-        // A past month already pushed (or known empty) can't have changed:
-        // Apify finalizes it once the payout invoice lands, and the cached
-        // breakdown it was built from is what a re-derive would return.
-        if (!force && rec && rec.ok && !isCurrentMonth(m) && !isSettlingMonth(m)) continue;
-
-        const dayMetrics = await hubDayMetrics(m, scope, alive);
-        if (!alive()) return;
-        if (!dayMetrics) {
-          incomplete = true; // fetch failed; the next pass retries
-          continue;
-        }
-        if (isEmptyMetrics(dayMetrics)) {
-          await AAP_HUB.markEmpty(m);
-          continue;
-        }
-        const left = months.length - months.indexOf(m) - 1;
-        const tail = left > 0 ? `, ${left} older month${left === 1 ? "" : "s"} to go` : "";
-        setHubStatus(`Apify Hub: syncing ${AAPF.monthLabel(m)}…${tail}`);
-        const md = await hubBreakdown(m, scope, dayMetrics, alive, (done, total) => {
-          setHubStatus(`Apify Hub: indexing ${AAPF.monthLabel(m)}… ${done}/${total}${tail}`);
-        });
-        if (!alive()) return;
-        if (!md) {
-          incomplete = true; // partial index; don't push an undercount
-          continue;
-        }
-        const r = await AAP_HUB.send(m, md.daily, dayMetrics, md.breakdown, { skipUnchanged: !force });
-        if (r.skipped && !r.unchanged) return void setHubStatus(""); // key removed mid-walk
-        // One month failing (a blip, a moment of hub downtime) is no reason to
-        // strand the twenty behind it: note it, keep walking, and let the next
-        // pass retry what didn't land.
-        if (!r.ok) {
-          failed = r;
-          failures++;
-          continue;
-        }
-        if (!r.unchanged) synced++;
-      }
-      if (!alive()) return;
-      completed = !failed && !incomplete;
-      const done = synced ? `synced ${synced} month${synced === 1 ? "" : "s"}` : "up to date";
-      if (failed) {
-        setHubStatus(`✗ Apify Hub: ${failures} month${failures === 1 ? "" : "s"} failed (${failed.message})`);
-      } else if (incomplete) {
-        setHubStatus(`✓ Apify Hub: ${done}, retrying the rest on the next load`);
-      } else {
-        setHubStatus(`✓ Apify Hub: ${done}`);
-      }
-    } catch (err) {
-      if (isInvalidated(err)) return retireOrphan();
-      setHubStatus(`✗ Apify Hub: ${describeError(err)}`);
-    } finally {
-      // A walk that stopped early (scope switched, a month failed, the token
-      // went stale) left months unsent: let the next load try again.
-      if (!completed) hubBackfillDoneFor = null;
-    }
-  }
-
-  // The month before this one keeps moving until Apify's payout invoice lands
-  // (lib/cache.js makes the same allowance), so a push of it isn't final
-  // either — re-check it while it can still change.
-  const HUB_SETTLING_DAYS = 14;
-  function isSettlingMonth(month) {
-    const now = new Date();
-    if (now.getUTCDate() > HUB_SETTLING_DAYS) return false;
-    const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
-    return String(month).slice(0, 7) === prev;
-  }
-
-  // Day totals for one month for the backfill: memory, then cache, then the
-  // network. Returns null when the fetch failed.
-  async function hubDayMetrics(month, scope, alive) {
-    const inMemory = monthDataScope === scope ? monthData[month]?.dayMetrics : null;
-    if (inMemory && !isCurrentMonth(month)) return inMemory;
-    const cached = await AAP_CACHE.getMetrics(month, scope);
-    if (cached && !cached.stale) return cached.dayMetrics;
-    if (!alive()) return null;
-    try {
-      const dayMetrics = await fetchDayMetrics(month, []);
-      await AAP_CACHE.setMetrics(month, scope, dayMetrics);
-      return dayMetrics;
-    } catch (err) {
-      if (isInvalidated(err)) throw err;
-      // A month before the account existed can 4xx rather than come back
-      // empty — treat it as the empty month it is.
-      if (/HTTP (400|404|422)/.test(String(err && err.message))) return {};
-      return null;
-    }
-  }
-
-  // The per-Actor breakdown for one month for the backfill: cache if fresh,
-  // otherwise a full index. Returns null if the index came back partial (a
-  // pushed undercount would look like a real drop in the hub).
-  async function hubBreakdown(month, scope, dayMetrics, alive, onProgress) {
-    const inMemory = monthDataScope === scope ? monthData[month] : null;
-    if (inMemory?.complete && !isCurrentMonth(month)) return inMemory;
-    const cached = await AAP_CACHE.get(month, scope);
-    const usable =
-      cached && !cached.stale && !(isCurrentMonth(month) && breakdownMissingRevenueDay(cached.daily, dayMetrics));
-    if (usable) return { daily: cached.daily, breakdown: cached.breakdown || null, complete: true };
-    if (!alive()) return null;
-    const r = await indexMonth(month, [], scope, dayMetrics, onProgress || null, () => !alive());
-    return r.complete ? r : null;
-  }
-
-  function setHubStatus(text) {
-    const el = document.querySelector(`.${TOOLBAR_CLASS} .aap-hub-status`);
-    if (el) el.textContent = text;
-  }
 
   // True when some day has revenue in the account-wide totals but no rows in
   // the per-Actor breakdown — the signature of a breakdown indexed before
@@ -1329,19 +1119,9 @@
         if (!alive()) return;
         monthData[m] = { ...monthData[m], ...r };
         publish({ indexing: true });
-        // Only a complete, unfiltered pass is worth pushing: a partial one
-        // would undercount, and a native-filter scope isn't the whole account.
-        if (r.complete && actorIds.length === 0) {
-          const hub = await AAP_HUB.settings();
-          if (hub.key) void syncToHub("auto", m);
-        }
       }
       if (!alive()) return;
       publish({ indexing: false, pendingMonths: pending });
-      // The chart is complete; now make sure Apify Hub has every month, not
-      // just the ones this range happened to cover. Queued, so it can't
-      // compete with the load that just finished.
-      if (actorIds.length === 0) void hubBackfill(false);
     } catch (err) {
       if (isInvalidated(err)) return retireOrphan();
       if (!alive()) return;
@@ -1362,7 +1142,7 @@
   // next load retries instead of serving stale wrong data.
   async function indexMonth(month, actorIds, scope, dayMetrics, onProgress, shouldStop) {
     const raw = await AAP_API.actorBreakdown(month, actorIds);
-    // Keep only what the hub payload reads (lib/hub.js) — the raw items carry
+    // Keep only the fields the chart reads — the raw items carry
     // whole Actor objects, which would bloat the per-month cache record.
     const breakdown = (Array.isArray(raw) ? raw : raw?.monetizationPerActor || []).map((item) => ({
       actor: { _id: item.actor?._id, title: item.actor?.title, name: item.actor?.name, pictureUrl: item.actor?.pictureUrl },
@@ -1409,8 +1189,7 @@
   // the ordinary day-totals cache (they're wanted for the chart anyway), and
   // the answer is cached for good — activity can't appear before it.
   // Always probes account-wide, whatever the native filter says.
-  async function resolveFirstMonth(shouldStop, opts) {
-    const quiet = !!(opts && opts.quiet); // the hub walk runs behind whatever is on screen
+  async function resolveFirstMonth(shouldStop) {
     const org = currentOrg();
     const cached = await AAP_CACHE.getFirstMonth(org);
     if (cached) return cached;
@@ -1426,7 +1205,7 @@
         batch.push(month);
         month = addMonths(month, -1);
       }
-      if (!quiet) publish({ indexing: true, phase: `Finding your first month… (${AAPF.monthLabel(batch[batch.length - 1])})` });
+      publish({ indexing: true, phase: `Finding your first month… (${AAPF.monthLabel(batch[batch.length - 1])})` });
       const results = await Promise.all(
         batch.map(async (m) => {
           const c = await AAP_CACHE.getMetrics(m, scope);
@@ -1458,8 +1237,7 @@
     // Only remember a month activity was actually seen in. The fallback is a
     // guess made when every probe came back empty — a brand new account, but
     // equally a run of failed probes — and this record never expires, so
-    // caching it would pin "All time" (and the hub's history walk) to the
-    // current month for good.
+    // caching it would pin "All time" to the current month for good.
     if (firstSeen) await AAP_CACHE.setFirstMonth(org, first);
     return first;
   }

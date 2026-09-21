@@ -387,24 +387,6 @@
   margin-right: 6px;
 }
 
-.aap-hub-button {
-  margin-left: auto;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.06);
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-.aap-hub-button:hover {
-  background: rgba(255, 255, 255, 0.12);
-}
-.aap-hub-status {
-  font-size: 12px;
-  opacity: 0.8;
-}
 
 /* ---- highlights panel (between the chart card and the Actor table) ----
    Styled after the table's card: #161718 fill, 1px #333538 border, 12px
