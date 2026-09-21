@@ -1,7 +1,7 @@
 /*
  * Assembles loadable extension packages for Chrome, Edge, and Firefox from src/.
  *
- *   node extensions/apify-analytics-plus/build.mjs
+ *   node build.mjs
  *
  * Chrome and Edge both run Manifest V3 / Chromium extensions, so their payload
  * is identical. Firefox runs the same MV3 source unmodified (it supports
@@ -69,6 +69,6 @@ for (const browser of Object.keys(BROWSER_PATCHES)) {
   await buildFor(browser);
 }
 console.log("\nLoad unpacked:");
-console.log("  Chrome  → chrome://extensions → Developer mode → Load unpacked → extensions/apify-analytics-plus/dist/chrome");
-console.log("  Edge    → edge://extensions  → Developer mode → Load unpacked → extensions/apify-analytics-plus/dist/edge");
-console.log("  Firefox → about:debugging → This Firefox → Load Temporary Add-on → extensions/apify-analytics-plus/dist/firefox/manifest.json");
+console.log("  Chrome  → chrome://extensions → Developer mode → Load unpacked → dist/chrome");
+console.log("  Edge    → edge://extensions  → Developer mode → Load unpacked → dist/edge");
+console.log("  Firefox → about:debugging → This Firefox → Load Temporary Add-on → dist/firefox/manifest.json");

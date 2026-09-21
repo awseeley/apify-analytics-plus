@@ -1,8 +1,15 @@
-# Apify Analytics Plus — browser extension
+# Apify Analytics Plus, browser extension
 
-A Chrome + Edge (Manifest V3) extension that adds a per-Actor daily
-breakdown to the Apify Console's **Monetization insights** page
+A Chrome, Edge and Firefox (Manifest V3) extension that adds a per-Actor
+daily breakdown to the Apify Console's **Monetization insights** page
 (`console.apify.com/actors/insights/monetization`).
+
+> **This repository is a read-only mirror.** The code is developed in a
+> private monorepo and pushed here automatically on every change, so commits
+> made directly to this repo will be overwritten. It exists so that anyone
+> running the extension can read exactly what they are running, and diff it
+> against the packages on the Chrome, Edge and Firefox stores. Issues are
+> welcome; please open them here rather than sending pull requests.
 
 ## What it does
 
@@ -148,13 +155,13 @@ build.mjs                     emits dist/chrome, dist/edge and dist/firefox
 ## Build & load
 
 ```bash
-node extensions/apify-analytics-plus/build.mjs
+node build.mjs
 ```
 
 - **Chrome:** `chrome://extensions` → enable *Developer mode* → *Load unpacked*
-  → select `extensions/apify-analytics-plus/dist/chrome`.
+  → select `dist/chrome`.
 - **Edge:** `edge://extensions` → enable *Developer mode* → *Load unpacked* →
-  select `extensions/apify-analytics-plus/dist/edge`.
+  select `dist/edge`.
 
 `src/` is also directly loadable during development.
 
