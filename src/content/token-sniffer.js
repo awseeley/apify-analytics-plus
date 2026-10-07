@@ -106,7 +106,14 @@
   // a URL, we hand back the raw response text.
   const CALL_EVENT = "aap-api-call";
   const RESULT_EVENT = "aap-api-result";
-  const ALLOWED_URL = /^https:\/\/console-backend\.apify\.com\/actor-analytics\//;
+  // The analytics family, plus the one Actor-list lookup the Acquisition
+  // tab's own filter dropdown makes (ids, names and icons of the account's
+  // Actors, which the per-Actor funnel table needs to know what to loop over),
+  // plus the two per-Actor reads the Actor quality tab makes (its score card,
+  // and the Actor record whose `notice` says "under maintenance"), which the
+  // Highlights "Today" table shows next to each earning Actor.
+  const ALLOWED_URL =
+    /^https:\/\/console-backend\.apify\.com\/(?:actor-analytics\/|actors\/find-users-owned-actors-by-text\?|actor-quality\/scores\/[A-Za-z0-9]+\?|actor\/[A-Za-z0-9]+\/basic-info\?)/;
 
   function reply(id, payload) {
     window.dispatchEvent(new CustomEvent(RESULT_EVENT, { detail: Object.assign({ id }, payload) }));
@@ -116,7 +123,7 @@
     const { id, url } = (event && event.detail) || {};
     if (!id || typeof url !== "string") return;
     // The page shares this window, so anything could fire this event. Only
-    // ever speak to the one backend path family, and only with the token the
+    // ever speak to the allowed backend paths, and only with the token the
     // page was already using.
     if (!ALLOWED_URL.test(url)) return reply(id, { error: "blocked" });
     if (!lastToken) return reply(id, { error: "no-token" });

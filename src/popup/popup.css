@@ -145,3 +145,29 @@ body {
   border: 1px solid #31384d;
   border-radius: 6px;
 }
+
+/* Per-card Highlights toggles, indented under the panel switch. */
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 12px 22px;
+}
+.field-group .field-inline {
+  margin: 0;
+}
+.field-group.disabled {
+  opacity: 0.45;
+}
+
+/* Settings are grouped by the Console page they change. */
+.card-path {
+  margin: -4px 0 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: #6b7288;
+}
+#view-settings .field-inline + .field-inline,
+#view-settings .field-inline + #hl-cards-extra,
+#view-settings #hl-cards-extra { margin-top: 6px; }
+.field-spaced { margin-top: 12px; }

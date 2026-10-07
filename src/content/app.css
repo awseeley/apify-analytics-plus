@@ -400,6 +400,7 @@
   font-family: inherit;
 }
 .aap-hl-head {
+  position: relative; /* anchors the customise menu */
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -428,15 +429,123 @@
   color: #f4f4f5;
   text-decoration: underline;
 }
+.aap-hl-gear {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: #9ca3af;
+  cursor: pointer;
+}
+.aap-hl-gear:hover,
+.aap-hl-gear.active {
+  color: #f4f4f5;
+  border-color: #333538;
+  background: #1b1c1d;
+}
+.aap-hl-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  width: 240px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #333538;
+  background: #1b1c1d;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+.aap-hl-menu-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #9ca3af;
+  margin-bottom: 6px;
+}
+.aap-hl-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  color: #e5e7eb;
+  cursor: pointer;
+}
+
+/* Today's earning Actors: full width under the cards. */
+.aap-hl-today {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #2a2c2f;
+  background: #1b1c1d;
+  min-width: 0;
+}
+.aap-hl-head + .aap-hl-today {
+  margin-top: 0;
+}
+.aap-hl-q {
+  display: inline-block;
+  min-width: 28px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-align: center;
+  cursor: help;
+}
+.aap-hl-q-good { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
+.aap-hl-q-mid { color: #fcd34d; background: rgba(250, 204, 21, 0.12); }
+.aap-hl-q-low { color: #fca5a5; background: rgba(248, 113, 113, 0.12); }
+/* Quality column appended to the Console's own Actor table. */
+/* Quality column appended to the Console's own Actor table. Matches the
+   neighbouring columns: left-aligned cells, and a sort header styled like
+   Apify's (12px label, 16px icon, blue icon while sorted). */
+.aap-nq {
+  white-space: nowrap;
+}
+.aap-nq-sort {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: rgb(191, 193, 197);
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.aap-nq-label {
+  color: #f4f4f5; /* Apify's header label; the icon keeps the button's grey */
+}
+.aap-nq-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.aap-nq-sort.active .aap-nq-icon {
+  color: #246dff;
+}
+.aap-hl-maint {
+  display: inline-flex;
+  flex: none;
+  margin-left: 6px;
+  color: #fbbf24;
+  cursor: help;
+}
+/* auto-fit, so switching cards off in the customise menu lets the rest
+   widen instead of leaving holes. */
 .aap-hl-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
-}
-@media (max-width: 1100px) {
-  .aap-hl-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 .aap-hl-card {
   padding: 10px 12px;
@@ -514,4 +623,256 @@
 }
 .aap-hl-foot {
   margin-top: 8px;
+}
+
+/* ---- Acquisition tab (content/acquisition.js) ---------------------------- */
+.aap-acq-panel {
+  padding: 14px 16px 12px;
+  border-radius: 12px;
+  border: 1px solid #333538;
+  background: #161718;
+  color: #e5e7eb;
+  font-family: inherit;
+  min-width: 0;
+}
+.aap-acq-conv {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #9ca3af;
+}
+.aap-acq-conv-rate {
+  color: #f4f4f5;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.aap-acq-conv-sep {
+  margin: 0 6px;
+  color: #4b5563;
+}
+.aap-acq-delta {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.aap-acq-delta-up { color: #4ade80; }
+.aap-acq-delta-down { color: #f87171; }
+.aap-acq-delta-flat { color: #9ca3af; }
+.aap-acq-delta-vs {
+  font-weight: 400;
+  color: #6b7280;
+}
+.aap-acq-new {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #93c5fd;
+  background: rgba(96, 165, 250, 0.14);
+}
+.aap-acq-direct {
+  color: #9ca3af;
+  font-style: italic;
+  cursor: help;
+}
+.aap-acq-foot {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #9ca3af;
+}
+.aap-acq-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+.aap-acq-bar b {
+  color: #f4f4f5;
+  font-weight: 600;
+}
+.aap-acq-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.aap-acq-scroll {
+  overflow-x: auto;
+}
+.aap-acq-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 18px;
+}
+.aap-acq-table th {
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #9ca3af;
+  border-bottom: 1px solid #2a2c2f;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.aap-acq-table th:hover,
+.aap-acq-table th.active {
+  color: #f4f4f5;
+}
+.aap-acq-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #202224;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.aap-acq-table .num {
+  text-align: right;
+}
+.aap-acq-table tbody tr:hover {
+  background: #1b1c1d;
+}
+.aap-acq-actor {
+  display: flex;
+  align-items: center;
+  max-width: 320px;
+}
+.aap-acq-actor span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f4f4f5;
+}
+.aap-acq-up { color: #4ade80; }
+.aap-acq-down { color: #f87171; }
+.aap-acq-dim { color: #4b5563; }
+.aap-acq-flags {
+  white-space: normal;
+}
+.aap-acq-flag {
+  display: inline-block;
+  margin: 1px 0 1px 4px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 500;
+  cursor: help;
+  white-space: nowrap;
+}
+.aap-acq-flag-flat { color: #fcd34d; background: rgba(250, 204, 21, 0.12); }
+.aap-acq-flag-low { color: #fca5a5; background: rgba(248, 113, 113, 0.12); }
+.aap-acq-flag-geo { color: #c4b5fd; background: rgba(167, 139, 250, 0.14); }
+.aap-acq-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-right: 8px;
+  color: #60a5fa;
+  font: inherit;
+  cursor: pointer;
+}
+.aap-acq-link:hover {
+  text-decoration: underline;
+}
+
+/* ---- Actor quality tab (content/quality.js) ------------------------------ */
+/* The native empty state, collapsed to one line (heading + Actor dropdown)
+   while our list shows. !important because these override Apify's
+   styled-components rules, whose specificity and order we don't control. */
+.aap-ql-compact,
+.aap-ql-compact [class*="EmptyStateWrapper"],
+.aap-ql-compact .CommonEmptyState-illustration {
+  display: block !important;
+  min-height: 0 !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: none !important;
+}
+.aap-ql-compact .CommonEmptyState-illustration-background,
+.aap-ql-compact .CommonEmptyState-illustration-icon,
+.aap-ql-compact .CommonEmptyState-content > p,
+.aap-ql-compact .CommonEmptyState-action-buttons {
+  display: none !important;
+}
+.aap-ql-compact .CommonEmptyState-content {
+  position: static !important;
+  transform: none !important;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 16px !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
+}
+.aap-ql-compact .CommonEmptyState-content > h3 {
+  margin: 0 !important;
+  font-size: 14px !important;
+  line-height: 20px !important;
+  font-weight: 500 !important;
+}
+.aap-ql-compact .CommonEmptyState-content > div {
+  margin: 0 !important;
+}
+.aap-ql {
+  margin-top: 16px;
+}
+.aap-ql .aap-hl-head {
+  align-items: center;
+}
+.aap-ql-search {
+  width: 200px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #333538;
+  background: #1b1c1d;
+  color: #f4f4f5;
+  font: inherit;
+  font-size: 12px;
+}
+.aap-ql-search:focus {
+  outline: none;
+  border-color: #246dff;
+}
+.aap-ql-table tbody tr {
+  cursor: pointer;
+}
+.aap-ql-link {
+  max-width: 420px;
+  color: inherit;
+  text-decoration: none;
+}
+.aap-ql-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.aap-ql-name .aap-ql-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f4f4f5;
+}
+.aap-ql-name .aap-ql-slug {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  line-height: 14px;
+  color: #6b7280;
 }

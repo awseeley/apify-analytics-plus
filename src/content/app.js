@@ -97,6 +97,8 @@
     rangeMode: "aap.rangeMode",
     customRange: "aap.customRange",
     highlights: "aap.highlightsOn", // false hides the highlights panel; absent = shown
+    hlCards: "aap.hlCards", // { [cardKey]: false } per hidden highlights card; absent = shown
+    hlCustomise: "aap.hlCustomiseOn", // false hides the panel's customise button; absent = shown
   };
 
   // How often to re-fetch the cheap account-wide day totals while a month
@@ -263,6 +265,8 @@
     const mode = r[PREF_KEYS.rangeMode];
     if (RANGE_MODES.includes(mode) && (mode !== "custom" || state.customRange)) state.rangeMode = mode;
     highlightsOn = r[PREF_KEYS.highlights] !== false;
+    hlCardsOff = r[PREF_KEYS.hlCards] || {};
+    hlCustomiseOn = r[PREF_KEYS.hlCustomise] !== false;
     prefsLoaded = true;
     syncToolbar();
     drawChart();
@@ -282,6 +286,16 @@
     // back once the panel's own Hide button was used).
     if (changes[PREF_KEYS.highlights]) {
       highlightsOn = changes[PREF_KEYS.highlights].newValue !== false;
+      ensureHighlights();
+    }
+    if (changes[PREF_KEYS.hlCards]) {
+      hlCardsOff = changes[PREF_KEYS.hlCards].newValue || {};
+      ensureHighlights();
+      syncNativeQuality();
+    }
+    if (changes[PREF_KEYS.hlCustomise]) {
+      hlCustomiseOn = changes[PREF_KEYS.hlCustomise].newValue !== false;
+      if (!hlCustomiseOn) hlMenuOpen = false;
       ensureHighlights();
     }
   });
@@ -806,6 +820,9 @@
     document.querySelector(".aap-tooltip")?.remove();
     document.querySelector(`.${RANGE_SELECT_CLASS}`)?.remove();
     document.querySelector(`.${HIGHLIGHTS_CLASS}`)?.remove();
+    document.querySelectorAll(`.${NQ_CLASS}`).forEach((el) => el.remove());
+    nqSort = 0;
+    nqNativeOrder = [];
     restoreKpiCards();
     // The tooltip element is gone, but the pin/day state is separate JS
     // state — without resetting it here, navigating back to the Insights
@@ -851,6 +868,7 @@
 
   function pollTick() {
     if (!onInsightsRoute()) return;
+    syncNativeQuality();
     // Follow the Console's KPI tab (Costs / Revenue / Profit / Margin).
     const nextHeadline = nativeHeadline();
     if (nextHeadline !== headline) {
@@ -928,6 +946,8 @@
   let metricsOn = { revenue: true, runs: false, results: false };
   let showNativeOn = false;
   let highlightsOn = true;
+  let hlCardsOff = {}; // see PREF_KEYS.hlCards
+  let hlCustomiseOn = true; // see PREF_KEYS.hlCustomise
   let tooltipActorCount = DEFAULT_TOOLTIP_ACTOR_COUNT;
   let colorByActorId = new Map();
   let iconByActorId = new Map(); // actorId -> pictureUrl, merged over the months on screen
@@ -1813,16 +1833,268 @@
     { key: "topSuccess", title: "Best success rate", value: (a) => AAPF.pct(a.successRate), hint: (a) => `${AAPF.compact(a.runs)} runs` },
     { key: "bottomSuccess", title: "Worst success rate", value: (a) => AAPF.pct(a.successRate), hint: (a) => `${AAPF.compact(a.runs)} runs` },
   ];
+  // Everything the customise menu (and the popup's settings, which must list
+  // the same keys) can switch on and off, in display order. "today" is the
+  // full-width table under the cards.
+  const HIGHLIGHT_TOGGLES = [
+    ...HIGHLIGHT_CARDS.map(({ key, title }) => ({ key, title })),
+    { key: "today", title: "Today's earning Actors" },
+    { key: "nativeQuality", title: "Quality column in the Actor table" },
+  ];
+  const cardOn = (key) => hlCardsOff[key] !== false;
 
   // The Actor's own Console icon; falls back to its chart colour dot for an
   // Actor without a picture (or one cached before icons were stored).
-  function actorIconHtml(actorId) {
-    const url = iconByActorId.get(actorId);
+  function actorIconHtml(actorId, url = iconByActorId.get(actorId)) {
     if (url && /^https:\/\//.test(url)) {
       return `<img class="aap-hl-icon" src="${escapeHtml(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
     }
     return `<span class="aap-hl-icon aap-hl-icon-dot"><span class="aap-tt-dot" style="background:${colorByActorId.get(actorId) || OTHER_COLOR}"></span></span>`;
   }
+
+  // Quality scores and maintenance notices live in lib/actor-meta.js
+  // (shared with the Actor quality tab). Re-render whatever shows them as
+  // new ones land.
+  AAP_META.onChange(() => {
+    ensureHighlights();
+    syncNativeQuality();
+  });
+
+  // ---- quality column in the Console's own Actor table ------------------------
+  // Appended as the table's last column, header and cells, and re-synced
+  // every poll tick: the table is React's, and paging, sorting or a month
+  // switch rebuilds its rows without telling us. Rows are matched to Actors
+  // by their /actors/<id> link.
+  const NQ_CLASS = "aap-nq";
+  const ACTOR_LINK_RE = /\/actors\/([A-Za-z0-9]{17})(?:[/?#]|$)/;
+
+  function findNativeActorTable() {
+    return document.querySelector('[class*="actor_analytics_table"] table');
+  }
+
+  // Sorting by Quality reorders the rows on the page showing. The table is
+  // paginated by Apify, so that's all there is to sort; a bigger "Items per
+  // page" sorts more. Moving React's rows is safe only if React finds them
+  // back in its own order before it next reorders them itself, so
+  // nqNativeOrder keeps that order and is put back the moment a native
+  // header is clicked (in a capture listener, before React sees the click).
+  let nqSort = 0; // 0 = Apify's own order, -1 = quality high→low, 1 = low→high
+  let nqNativeOrder = []; // the row elements in React's order while nqSort is on
+
+  // Apify's own sort-header markup and icons (copied from the table's other
+  // headers), so the column looks and behaves like its neighbours: the idle
+  // double arrow, or a single blue arrow in the sort direction. The hashed
+  // styled-components classes give the exact look while they last; app.css
+  // restyles .aap-nq-sort the same way for when Apify's build renames them.
+  const NQ_ICON_PATHS = {
+    idle: "M14.167 2.5v15M8.333 15l-2.5 2.5-2.5-2.5M5.833 17.5v-15M16.667 5l-2.5-2.5-2.5 2.5",
+    desc: "M10 15.833V4.167M13.333 12.5 10 15.833M6.667 12.5 10 15.833",
+    asc: "M10 4.167v11.666M13.333 7.5 10 4.167M6.667 7.5 10 4.167",
+  };
+  function nqHeaderHtml() {
+    const path = NQ_ICON_PATHS[nqSort < 0 ? "desc" : nqSort > 0 ? "asc" : "idle"];
+    const icon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20" class="_icon_16_1678j_6 SimpleTable-Head-Row-Cell-Content-Action-Button-Icon aap-nq-icon" aria-hidden="true"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.667" d="${path}"></path></svg>`;
+    return (
+      `<div class="SimpleTable-Head-Row-Cell-Content">` +
+      `<div class="SimpleTable-Head-Row-Cell-Content-Sort SimpleTable-Head-Row-Cell-Action${nqSort ? " SimpleTable-Head-Row-Cell-Content-Action_active" : ""}">` +
+      `<button type="button" class="box__StyledBox-sc-1e7krbt-0 cIdqHZ buttonstyle__StyledButton-sc-139t548-0 bxWVNv SimpleTable-Head-Row-Cell-Content-Action-Button aap-nq-sort${nqSort ? " active" : ""}"><span class="aap-nq-label">Quality</span>${icon}</button>` +
+      `</div></div>`
+    );
+  }
+
+  function restoreNativeOrder(tbody) {
+    const live = nqNativeOrder.filter((r) => r.parentElement === tbody);
+    live.forEach((r) => tbody.appendChild(r));
+    nqNativeOrder = [];
+  }
+
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (!nqSort) return;
+      const th = e.target.closest?.("th");
+      const table = findNativeActorTable();
+      if (!th || !table?.contains(th) || th.classList.contains(NQ_CLASS)) return;
+      const tbody = table.querySelector("tbody");
+      if (tbody) restoreNativeOrder(tbody);
+      nqSort = 0;
+      const btn = table.querySelector(`th.${NQ_CLASS}`);
+      if (btn) btn.innerHTML = nqHeaderHtml();
+    },
+    true,
+  );
+
+  function sortNativeRows(tbody) {
+    const rows = [...tbody.children].filter((r) => r.children.length >= 2);
+    // React re-rendered (page, month or filter change) since the last sort:
+    // whatever order it left is its own, so remember that one.
+    const known = new Set(nqNativeOrder);
+    if (rows.length !== nqNativeOrder.length || rows.some((r) => !known.has(r))) nqNativeOrder = rows;
+    const score = (r) => AAP_META.get(r.querySelector(`:scope > .${NQ_CLASS}`)?.dataset.id)?.quality ?? null;
+    const sorted = [...nqNativeOrder].sort((a, b) => {
+      const va = score(a);
+      const vb = score(b);
+      if (va == null || vb == null) return va == null ? (vb == null ? 0 : 1) : -1; // unscored last
+      return nqSort * (va - vb);
+    });
+    if (sorted.some((r, i) => rows[i] !== r)) sorted.forEach((r) => tbody.appendChild(r));
+  }
+
+  function syncNativeQuality() {
+    const table = findNativeActorTable();
+    if (!table) return;
+    // Independent of the Highlights panel's own Hide: it lives in another card.
+    if (!cardOn("nativeQuality")) {
+      const tbody = table.querySelector("tbody");
+      if (nqSort && tbody) restoreNativeOrder(tbody);
+      nqSort = 0;
+      table.querySelectorAll(`.${NQ_CLASS}`).forEach((el) => el.remove());
+      return;
+    }
+    const headRow = table.querySelector("thead tr");
+    if (headRow && !headRow.querySelector(`.${NQ_CLASS}`)) {
+      const th = document.createElement("th");
+      th.className = `SimpleTable-Head-Row-Cell ${NQ_CLASS}`;
+      th.title = "Apify's Actor quality score, out of 100 (Insights → Actor quality). Sorts the Actors on this page. Added by Apify Analytics Plus.";
+      th.innerHTML = nqHeaderHtml();
+      th.addEventListener("click", (e) => {
+        e.stopPropagation();
+        nqSort = nqSort < 0 ? 1 : -1; // high→low first, then flip
+        th.innerHTML = nqHeaderHtml();
+        syncNativeQuality();
+      });
+      headRow.appendChild(th);
+    }
+    const ids = [];
+    for (const row of table.querySelectorAll("tbody tr")) {
+      if (row.children.length < 2) continue; // an empty-state row spanning the table
+      const href = row.querySelector("a[href]")?.getAttribute("href") || "";
+      const id = href.match(ACTOR_LINK_RE)?.[1];
+      let td = row.querySelector(`:scope > .${NQ_CLASS}`);
+      if (!td) {
+        td = document.createElement("td");
+        td.className = `SimpleTable-Body-Cell ${NQ_CLASS}`;
+        row.appendChild(td);
+      }
+      if (!id) {
+        td.innerHTML = "";
+        continue;
+      }
+      ids.push(id);
+      const html = AAP_META.badgeHtml(AAP_META.get(id));
+      if (td.dataset.id !== id || td.dataset.html !== html) {
+        td.dataset.id = id;
+        td.dataset.html = html;
+        td.innerHTML = html;
+      }
+    }
+    const tbody = table.querySelector("tbody");
+    if (nqSort && tbody) sortNativeRows(tbody);
+    if (ids.length) AAP_META.ensure(ids);
+  }
+
+  // ---- today's earning Actors -------------------------------------------------
+  // Read from the current month's per-Actor index whether or not the range on
+  // screen reaches today (it's only absent when that month was never loaded
+  // for this scope). null = not loaded; [] = loaded, nothing earned yet.
+  function todayData() {
+    const day = todayUtc();
+    const md = monthData[monthOf(day)];
+    if (!md?.daily) return null;
+    return { day, icons: md.icons || {}, rows: (md.daily[day] || []).filter((r) => r.revenue > 0) };
+  }
+
+  const TODAY_COLS = [
+    { key: "name", label: "Actor" },
+    { key: "revenue", label: "Revenue", fmt: (r) => AAPF.money(r.revenue || 0) },
+    { key: "cost", label: "Cost", fmt: (r) => AAPF.money(r.cost || 0) },
+    { key: "profit", label: "Profit", fmt: (r) => AAPF.money(r.profit || 0) },
+    { key: "runs", label: "Runs", fmt: (r) => AAPF.compact(r.runs ?? 0) },
+    { key: "results", label: "Results", fmt: (r) => AAPF.compact(r.results ?? 0) },
+    { key: "successRate", label: "Success", fmt: (r) => AAPF.pct(r.successRate) },
+    { key: "quality", label: "Quality", title: "Apify's Actor quality score, out of 100 (Insights → Actor quality)" },
+  ];
+  let todaySort = { key: "revenue", dir: -1 };
+
+  function todaySortValue(r, key) {
+    const m = AAP_META.get(r.actorId);
+    if (key === "quality") return m?.quality ?? -1;
+    return r[key] ?? -Infinity;
+  }
+
+  const WRENCH_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
+  const GEAR_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>`;
+
+  // A wrench beside the name when Apify has put the Actor under maintenance
+  // (or set any other notice on it); nothing otherwise.
+  function maintenanceHtml(m) {
+    if (!m?.notice || m.notice === "NONE") return "";
+    const title =
+      m.notice === "UNDER_MAINTENANCE"
+        ? "Under maintenance: Apify has flagged this Actor, usually after it failed its automated tests. Check its runs and Store page."
+        : `Apify notice on this Actor: ${m.notice}`;
+    return `<span class="aap-hl-maint" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${WRENCH_SVG}</span>`;
+  }
+
+  function todayHtml(t) {
+    let html = `<div class="aap-hl-today">`;
+    if (!t) {
+      html += `<div class="aap-hl-card-title">Today</div>`;
+      html += `<div class="aap-hl-note">${lastData?.indexing ? "Indexing Actors…" : "Today's Actors load with the current month. Pick This month (or any range ending today) to see them."}</div></div>`;
+      return html;
+    }
+    const revenue = t.rows.reduce((s, r) => s + (r.revenue || 0), 0);
+    const n = t.rows.length;
+    html += `<div class="aap-hl-card-title">Today, ${AAPF.shortDate(t.day)} (UTC)${n ? ` · ${n} earning Actor${n === 1 ? "" : "s"} · ${AAPF.money(revenue)} revenue` : ""}</div>`;
+    if (!n) return html + `<div class="aap-hl-note">No Actor has earned anything yet today.</div></div>`;
+
+    const { key, dir } = todaySort;
+    const rows = [...t.rows].sort((a, b) =>
+      key === "name" ? dir * a.name.localeCompare(b.name) : dir * (todaySortValue(a, key) - todaySortValue(b, key)) || b.revenue - a.revenue,
+    );
+    html += `<div class="aap-acq-scroll"><table class="aap-acq-table"><thead><tr>`;
+    for (const c of TODAY_COLS) {
+      const active = c.key === key;
+      html += `<th class="${c.key === "name" ? "" : "num"}${active ? " active" : ""}" data-today-sort="${c.key}"${c.title ? ` title="${escapeHtml(c.title)}"` : ""}>${c.label}${active ? (dir < 0 ? " ↓" : " ↑") : ""}</th>`;
+    }
+    html += `</tr></thead><tbody>`;
+    for (const r of rows) {
+      const m = AAP_META.get(r.actorId);
+      html += `<tr><td><div class="aap-acq-actor">${actorIconHtml(r.actorId, t.icons[r.actorId])}<span title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>${maintenanceHtml(m)}</div></td>`;
+      for (const c of TODAY_COLS.slice(1, -1)) html += `<td class="num">${c.fmt(r)}</td>`;
+      html += `<td class="num">${AAP_META.badgeHtml(m)}</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+    html += `<div class="aap-hl-foot">Per-Actor figures refresh every 15 minutes and today's keep settling until the day ends.</div></div>`;
+    return html;
+  }
+
+  // ---- customise menu ----------------------------------------------------------
+  // A content script can't open the extension's own popup, so the gear opens
+  // the same toggles in place. Both write PREF_KEYS.hlCards, and each picks
+  // up the other's changes through storage.onChanged.
+  let hlMenuOpen = false;
+
+  function menuHtml() {
+    let html = `<div class="aap-hl-menu" role="dialog" aria-label="Customise highlights"><div class="aap-hl-menu-title">Show</div>`;
+    for (const t of HIGHLIGHT_TOGGLES) {
+      html += `<label class="aap-hl-menu-item"><input type="checkbox" data-card="${t.key}"${cardOn(t.key) ? " checked" : ""}> ${t.title}</label>`;
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  function setMenuOpen(open) {
+    if (hlMenuOpen === open) return;
+    hlMenuOpen = open;
+    ensureHighlights();
+  }
+  document.addEventListener("click", (e) => {
+    if (hlMenuOpen && !e.target.closest?.(".aap-hl-menu, .aap-hl-gear")) setMenuOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setMenuOpen(false);
+  });
 
   function renderHighlights(panel) {
     const d = lastData;
@@ -1830,23 +2102,36 @@
     const h = computeHighlights(d?.daily);
     const months = d?.months || [];
     const pending = d?.pendingMonths || [];
+    const cards = HIGHLIGHT_CARDS.filter((c) => cardOn(c.key));
+    const showToday = cardOn("today");
+    const anyInPanel = cards.length || showToday;
+    const today = showToday ? todayData() : null;
+    if (today?.rows.length) AAP_META.ensure(today.rows.map((r) => r.actorId), { notice: true });
+    const todayMeta = today?.rows.map((r) => AAP_META.get(r.actorId) || null);
     // Only touch the DOM when something visible changed — this runs on every
-    // poll tick, and rebuilding would swap the Hide button out from under a
-    // click.
-    const sig = JSON.stringify([range, h, !!d?.indexing, pending.length, months.length, [...colorByActorId.entries()], iconByActorId.size]);
+    // poll tick, and rebuilding would swap the buttons out from under a click.
+    const sig = JSON.stringify([range, h, !!d?.indexing, pending.length, months.length, [...colorByActorId.entries()], iconByActorId.size, hlCardsOff, hlCustomiseOn, hlMenuOpen, today, todayMeta, todaySort]);
     if (panel.dataset.sig === sig) return;
     panel.dataset.sig = sig;
 
     const rangeText = range ? (range.from ? AAPF.rangeLabel(range.from, range.to) : "All time") : "";
     let html = `<div class="aap-hl-head"><span class="aap-hl-title">Highlights</span><span class="aap-hl-range">${escapeHtml(rangeText)}</span>`;
-    html += `<button type="button" class="aap-hl-hide" title="Hide this panel. Turn it back on in the extension's settings.">Hide</button></div>`;
+    if (hlCustomiseOn) {
+      html += `<button type="button" class="aap-hl-gear${hlMenuOpen ? " active" : ""}" title="Customise highlights" aria-label="Customise highlights" aria-expanded="${hlMenuOpen}">${GEAR_SVG}</button>`;
+    }
+    html += `<button type="button" class="aap-hl-hide" title="Hide this panel. Turn it back on in the extension's settings.">Hide</button>`;
+    if (hlCustomiseOn && hlMenuOpen) html += menuHtml();
+    html += `</div>`;
 
     const empty = !h.profit.length && !h.cost.length && !h.topSuccess.length;
-    if (empty) {
+    if (!anyInPanel) {
+      html += `<div class="aap-hl-note">Every highlight is switched off. ${hlCustomiseOn ? "Use the customise button" : "Use the extension's settings"} to pick some.</div>`;
+    }
+    if (cards.length && empty) {
       html += `<div class="aap-hl-note">${d?.indexing ? "Indexing Actors…" : "No paid Actor activity in this range."}</div>`;
-    } else {
+    } else if (cards.length) {
       html += '<div class="aap-hl-grid">';
-      for (const card of HIGHLIGHT_CARDS) {
+      for (const card of cards) {
         const rows = h[card.key];
         html += `<div class="aap-hl-card"><div class="aap-hl-card-title">${card.title}</div>`;
         if (!rows.length) {
@@ -1864,14 +2149,35 @@
       html += "</div>";
       if (d?.indexing) html += `<div class="aap-hl-foot">Indexing Actors… rankings will update.</div>`;
       else if (pending.length) html += `<div class="aap-hl-foot">Actor breakdown covers ${months.length - pending.length} of ${months.length} months in this range (see "Load more" in the toolbar).</div>`;
-      else if (h.qualified === 0) html += `<div class="aap-hl-foot">Success-rate cards need an Actor with ${HIGHLIGHT_MIN_RUNS}+ runs.</div>`;
+      else if (h.qualified === 0 && cards.some((c) => c.key.endsWith("Success"))) html += `<div class="aap-hl-foot">Success-rate cards need an Actor with ${HIGHLIGHT_MIN_RUNS}+ runs.</div>`;
     }
+    if (showToday) html += todayHtml(today);
     panel.innerHTML = html;
+
     panel.querySelector(".aap-hl-hide").addEventListener("click", () => {
       highlightsOn = false;
+      hlMenuOpen = false;
       savePref({ [PREF_KEYS.highlights]: false });
       ensureHighlights();
     });
+    panel.querySelector(".aap-hl-gear")?.addEventListener("click", () => setMenuOpen(!hlMenuOpen));
+    panel.querySelectorAll(".aap-hl-menu input[data-card]").forEach((box) =>
+      box.addEventListener("change", () => {
+        const next = { ...hlCardsOff };
+        if (box.checked) delete next[box.dataset.card];
+        else next[box.dataset.card] = false;
+        hlCardsOff = next;
+        savePref({ [PREF_KEYS.hlCards]: next });
+        ensureHighlights();
+      }),
+    );
+    panel.querySelectorAll("th[data-today-sort]").forEach((th) =>
+      th.addEventListener("click", () => {
+        const k = th.dataset.todaySort;
+        todaySort = k === todaySort.key ? { key: k, dir: -todaySort.dir } : { key: k, dir: k === "name" ? 1 : -1 };
+        ensureHighlights();
+      }),
+    );
   }
 
   // ---- hover tooltip --------------------------------------------------------

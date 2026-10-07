@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Apify Analytics Plus",
-  "version": "0.3.4",
-  "description": "Adds a per-Actor daily breakdown to the Apify Console Monetization insights page. Click a day to see which Actors drove it.",
+  "version": "0.4.0",
+  "description": "Per-Actor breakdowns for Apify Console Insights: daily revenue by Actor, plus per-Actor funnels and traffic changes on Acquisition.",
   "permissions": [
     "storage",
     "unlimitedStorage"
@@ -40,7 +40,10 @@
         "lib/format.js",
         "lib/api.js",
         "lib/cache.js",
-        "content/app.js"
+        "lib/actor-meta.js",
+        "content/app.js",
+        "content/acquisition.js",
+        "content/quality.js"
       ],
       "css": [
         "content/app.css"

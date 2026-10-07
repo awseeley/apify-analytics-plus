@@ -23,7 +23,10 @@
         <p class="blurb">
           On the Console's <strong>Monetization insights</strong> page, adds a
           breakdown panel below the chart: click a day to see which Actors
-          drove that day's revenue, cost, profit and runs.
+          drove that day's revenue, cost, profit and runs. On
+          <strong>Acquisition</strong>, adds conversion rates, a funnel
+          for every Actor with quality flags, and month-on-month
+          changes for referrers and countries.
         </p>
       </section>
 
@@ -72,12 +75,27 @@
       </button>
 
       <section class="card">
-        <div class="card-title">Settings</div>
+        <div class="card-title">Monetization insights</div>
+        <div class="card-path">/actors/insights/monetization</div>
         <label class="field field-inline">
           <input id="highlights-on" type="checkbox" />
-          <span>Show Highlights under the chart (top profit, top cost, best and worst success rate for the selected range)</span>
+          <span>Show Highlights under the chart</span>
         </label>
-        <label class="field">
+        <div id="hl-cards" class="field-group">
+          <label class="field field-inline"><input type="checkbox" data-card="profit" /><span>Top profit</span></label>
+          <label class="field field-inline"><input type="checkbox" data-card="cost" /><span>Top cost</span></label>
+          <label class="field field-inline"><input type="checkbox" data-card="topSuccess" /><span>Best success rate</span></label>
+          <label class="field field-inline"><input type="checkbox" data-card="bottomSuccess" /><span>Worst success rate</span></label>
+          <label class="field field-inline"><input type="checkbox" data-card="today" /><span>Today's earning Actors, with Apify quality score and a maintenance flag (2 requests per Actor, cached 6 hours)</span></label>
+        </div>
+        <label class="field field-inline">
+          <input id="hl-customise-on" type="checkbox" />
+          <span>Show the customise button on the Highlights panel</span>
+        </label>
+        <div id="hl-cards-extra">
+          <label class="field field-inline"><input type="checkbox" data-card="nativeQuality" /><span>Quality score column in the Console's Actor table (1 request per Actor shown, cached 6 hours)</span></label>
+        </div>
+        <label class="field field-spaced">
           <span>Actors shown in breakdown tooltip</span>
           <input id="tooltip-actor-count" type="number" min="1" max="50" />
         </label>
@@ -85,6 +103,24 @@
           Default is <span id="tooltip-actor-count-default"></span>.
           <button id="tooltip-actor-count-reset" class="link-button" type="button">Reset to default</button>
         </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Actor quality</div>
+        <div class="card-path">/actors/insights/actor-quality</div>
+        <label class="field field-inline">
+          <input id="ql-on" type="checkbox" />
+          <span>List every Actor with its score when none is picked (1 request per Actor, cached 6 hours)</span>
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Acquisition</div>
+        <div class="card-path">/actors/insights/acquisition</div>
+        <label class="field field-inline">
+          <input id="acq-actors-on" type="checkbox" />
+          <span>Show the funnel by Actor (one request per Actor per month, cached)</span>
+        </label>
       </section>
     </div>
 

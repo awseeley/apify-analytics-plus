@@ -55,7 +55,7 @@
 
   document.getElementById("clear-cache").addEventListener("click", async () => {
     const all = await chrome.storage.local.get(null);
-    const keys = Object.keys(all).filter((k) => k.startsWith("aap.breakdown."));
+    const keys = Object.keys(all).filter((k) => k.startsWith("aap.breakdown.") || k.startsWith("aap.acq.") || k.startsWith("aap.actorMeta"));
     if (keys.length) await chrome.storage.local.remove(keys);
     loadCacheSummary();
   });
@@ -88,6 +88,51 @@
     countInput.value = TOOLTIP_ACTOR_COUNT_DEFAULT;
     chrome.storage.local.remove(TOOLTIP_ACTOR_COUNT_KEY);
   });
+
+  // ---- Settings: panel toggles. Absent = on, so only an explicit false
+  // is stored; the content scripts pick changes up live via onChanged.
+  const TOGGLES = { "highlights-on": "aap.highlightsOn", "hl-customise-on": "aap.hlCustomiseOn", "acq-actors-on": "aap.acqActorsOn", "ql-on": "aap.qualityListOn" };
+  chrome.storage.local.get(Object.values(TOGGLES)).then((r) => {
+    for (const [id, key] of Object.entries(TOGGLES)) {
+      const box = document.getElementById(id);
+      box.checked = r[key] !== false;
+      box.addEventListener("change", () => {
+        if (box.checked) chrome.storage.local.remove(key);
+        else chrome.storage.local.set({ [key]: false });
+      });
+    }
+  });
+
+  // ---- Settings: individual Highlights cards. One object pref holding
+  // `false` per hidden card (absent = shown), the same one the panel's own
+  // customise menu writes. Greyed out while the whole panel is off.
+  const HL_CARDS_KEY = "aap.hlCards";
+  const cardBoxes = [...document.querySelectorAll("#hl-cards input[data-card], #hl-cards-extra input[data-card]")];
+  const hlGroup = document.getElementById("hl-cards");
+  const highlightsBox = document.getElementById("highlights-on");
+  const syncHlGroup = () => hlGroup.classList.toggle("disabled", !highlightsBox.checked);
+  highlightsBox.addEventListener("change", syncHlGroup);
+
+  function paintCards(off) {
+    for (const box of cardBoxes) box.checked = off[box.dataset.card] !== false;
+  }
+  chrome.storage.local.get([HL_CARDS_KEY, "aap.highlightsOn"]).then((r) => {
+    paintCards(r[HL_CARDS_KEY] || {});
+    highlightsBox.checked = r["aap.highlightsOn"] !== false;
+    syncHlGroup();
+  });
+  // The in-page menu can change these while the popup is open.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes[HL_CARDS_KEY]) paintCards(changes[HL_CARDS_KEY].newValue || {});
+  });
+  for (const box of cardBoxes) {
+    box.addEventListener("change", async () => {
+      const off = { ...((await chrome.storage.local.get(HL_CARDS_KEY))[HL_CARDS_KEY] || {}) };
+      if (box.checked) delete off[box.dataset.card];
+      else off[box.dataset.card] = false;
+      chrome.storage.local.set({ [HL_CARDS_KEY]: off });
+    });
+  }
 
   // 0.3.3 removed the Apify Hub sync entirely. Purge what it left behind so
   // an upgraded install keeps no key or sync history on disk.

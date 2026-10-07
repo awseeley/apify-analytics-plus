@@ -21,6 +21,9 @@
   const TTL = {
     metrics: { current: MIN, settling: 6 * HOUR, final: 30 * DAY },
     breakdown: { current: 15 * MIN, settling: DAY, final: 30 * DAY },
+    // Acquisition counts unique people per month; nothing on that page is
+    // worth re-asking for more than hourly, and a closed month is final.
+    acq: { current: HOUR, settling: 6 * HOUR, final: 30 * DAY },
   };
   const SETTLING_DAYS = 14; // days into a month during which the previous month may still change
 
@@ -35,7 +38,8 @@
     return t.final;
   }
 
-  const PREFIXES = ["aap.breakdown.", "aap.metrics.", "aap.firstMonth."];
+  // aap.actorMeta is app.js's per-Actor quality score + maintenance notice map.
+  const PREFIXES = ["aap.breakdown.", "aap.metrics.", "aap.firstMonth.", "aap.acq.", "aap.actorMeta"];
   const VERSION_KEY = "aap.cacheVersion";
 
   // False once the extension has been reloaded/updated under this page: the
@@ -129,6 +133,13 @@
     }
   }
 
+  // ---- Acquisition tab. `name` picks the record family:
+  //   aap.acq.total.<month>[:scope]   one monthly-marketing response
+  //   aap.acq.actors.<month>[:org]    per-Actor funnel rows for that month
+  //   aap.acq.list.<month>[:org]      the owned-Actor list (current-month TTL)
+  const getAcq = (name, month, scope) => read(`aap.acq.${name}.`, "acq", month, scope);
+  const setAcq = (name, month, scope, data) => write(`aap.acq.${name}.`, month, scope, data);
+
   async function clearAll() {
     if (!alive()) return 0;
     const all = await chrome.storage.local.get(null);
@@ -137,5 +148,5 @@
     return keys.length;
   }
 
-  self.AAP_CACHE = { get, set, getMetrics, setMetrics, getFirstMonth, setFirstMonth, clearAll, PREFIXES };
+  self.AAP_CACHE = { get, set, getMetrics, setMetrics, getFirstMonth, setFirstMonth, getAcq, setAcq, clearAll, PREFIXES };
 })();

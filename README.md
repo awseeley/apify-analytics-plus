@@ -69,8 +69,9 @@ URL, passes it over a `CustomEvent`, and gets the raw response body back the
 same way. Only an isolated-world fetch would have needed a
 `host_permissions` grant for `console-backend.apify.com`, and there isn't
 one any more: the extension now asks for `storage` and nothing else. The
-bridge only ever accepts `console-backend.apify.com/actor-analytics/*` URLs,
-since the page shares that event target.
+bridge only ever accepts `console-backend.apify.com/actor-analytics/*` URLs
+(plus the owned-Actor list and the two per-Actor quality reads described
+under *Highlights*), since the page shares that event target.
 
 ## Date ranges (0.3.0+)
 
@@ -126,6 +127,95 @@ left out of the success-rate cards). Rows show the Actor's own Console icon
 (from the breakdown response, cached per month). Built from the per-Actor
 index already in memory, so it adds no requests. The panel's Hide button turns it off;
 the popup's Settings turn it back on.
+
+**Today's earning Actors (0.4.0+)**: a full-width table under the cards
+listing every Actor with revenue today (UTC), with revenue, cost, profit,
+runs, results and success rate from the current month's per-Actor index
+(shown whatever range is on screen, as long as the current month has been
+loaded). Each row also shows:
+
+- **Quality**: Apify's Actor quality score out of 100, from
+  `actor-quality/scores/<actorId>` (the Console's own *Actor quality* tab),
+  coloured green 75+, amber 50+, red below; hover for the platform percentile.
+- **Maintenance**: an amber wrench beside the Actor's name when its record's
+  `notice` is `UNDER_MAINTENANCE` (from `actor/<actorId>/basic-info`);
+  nothing when it isn't.
+
+**Quality column in the Console's Actor table (0.4.0+)**: the same score is
+appended as a last "Quality" column to the Console's own per-Actor table
+under the panel, for whichever page of it is showing. Rows are matched by
+their `/actors/<actorId>` link and re-synced every poll tick, since paging
+and sorting rebuild the table's rows. It has its own toggle, independent of
+the panel's Hide. Clicking its header sorts the rows on the page showing
+(high to low, then low to high; unscored rows last). The table is
+paginated by Apify, so that is all it can sort. Clicking any of Apify's own
+headers hands the order back: the rows are first put back in React's own
+order (in a capture listener, before React handles the click), since React
+reorders rows assuming it left them where they are.
+
+Scores cost 1 request per Actor shown (Today table or visible table page)
+and the maintenance notice 1 more, for Today rows only; 5 in flight at most,
+each cached for 6 hours in one `aap.actorMeta` record (30 minutes after a
+failure). Every other Highlights number is still request-free.
+
+**Customising (0.4.0+)**: the sliders button in the panel header opens a
+menu to switch each card, the Today table and the Actor-table Quality
+column on or off individually. The
+same toggles sit in the popup's Settings under the Highlights switch; both
+write one `aap.hlCards` pref (`{ cardKey: false }` per hidden card) and pick
+up each other's changes live. A content script can't open the extension
+popup itself, which is why the menu lives in the page. The popup's "Show the
+customise button" setting (`aap.hlCustomiseOn`) hides the button for anyone
+who'd rather manage it all from the popup.
+
+## Actor quality tab (0.4.0+)
+
+`content/quality.js` enhances `console.apify.com/actors/insights/actor-quality`.
+With no Actor picked the native tab only says "Select an Actor to get
+started"; under that we list every Actor the account owns with its quality
+score and platform percentile. The list is sortable (score or name),
+searchable, and shows the account's average and how many Actors score below
+50. Clicking a row opens the native per-Actor view in place (`?actorId=<id>`,
+via `pushState` + `popstate`, which is all the Console's router needs);
+cmd/ctrl-click opens it in a new tab.
+
+The Actor list is the owned-Actor lookup the Acquisition tab already makes
+(and shares its cache record). Scores come from `lib/actor-meta.js`, the
+module the Monetization tab's Today table and Quality column use: 1 request
+per Actor, 5 in flight, cached 6 hours in `aap.actorMeta`, so the first visit
+on a large account takes a little while (the header counts progress) and
+every visit after that is free. The popup's "Actor quality: list every
+Actor" setting (`aap.qualityListOn`) or the panel's Hide button turns it off.
+
+## Acquisition tab (0.4.0+)
+
+`content/acquisition.js` enhances `console.apify.com/actors/insights/acquisition`,
+whose funnel, referrers and countries all come from one endpoint,
+`actor-analytics/monthly-marketing` (same comma-joined `actorIds` filter).
+It reads the month and Actor filter from the page URL
+(`?timePeriod=YYYY-MM&actorId=...`) and adds:
+
+- **Conversion on the funnel cards**: detail → input, input → start and
+  detail → start, each with its change in points against the previous month.
+- **Funnel by Actor**: one row per Actor with viewers, sortable, with rates
+  coloured against the account average once 30+ people reach that step.
+- **Flags** on that table: *Views up, starts flat* (viewers +50% on last
+  month's pace while starts grew 10% or less), *Low conversion* (100+
+  viewers, detail → start under 40% of the account rate) and a one-country
+  flag (60%+ of viewers from one country and conversion below average).
+- **Referrer / country changes**: point deltas against the previous month,
+  a "new" badge, and what left the top 10.
+- **Blank referrer** labelled "Direct / unknown", plus a note that referrer
+  shares overlap and so add up to more than 100%.
+
+Request budget: 2 calls for the month and the one before it (past months
+cached 30 days), one
+for the Actor list (the same lookup the tab's filter dropdown makes; the
+bridge allows that one path besides `actor-analytics/*`), then one call per
+Actor for the month, 5 in flight, and one more per Actor with 20+ viewers
+for the previous month. Past months cost nothing after the first visit; the
+current month refreshes at most hourly, and only while the tab is visible.
+The table has a Hide button and a toggle in the popup's Settings.
 
 ## No data leaves your browser (0.3.3+)
 

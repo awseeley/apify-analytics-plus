@@ -13,7 +13,8 @@
  * host permission at all.
  */
 (function () {
-  const BASE = "https://console-backend.apify.com/actor-analytics";
+  const HOST = "https://console-backend.apify.com";
+  const BASE = `${HOST}/actor-analytics`;
   const MAX_CONCURRENT = 5;
 
   // Only a readiness gate now that the MAIN world holds the copy it actually
@@ -32,14 +33,14 @@
     return token ? Promise.resolve() : new Promise((resolve) => waiters.push(resolve));
   }
 
-  function buildUrl(path, params) {
+  function buildUrl(path, params, base = BASE) {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params || {})) {
       if (v == null) continue;
       if (Array.isArray(v)) v.forEach((x) => qs.append(k, x));
       else qs.set(k, v);
     }
-    return `${BASE}/${path}?${qs.toString()}`;
+    return `${base}/${path}?${qs.toString()}`;
   }
 
   // ---- Bridge to the MAIN-world fetcher ---------------------------------
@@ -91,9 +92,9 @@
   const RETRYABLE = new Set(["network", "timeout"]);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  async function req(path, params) {
+  async function req(path, params, base) {
     await ready();
-    const url = buildUrl(path, params);
+    const url = buildUrl(path, params, base);
     for (let attempt = 0; ; attempt++) {
       const res = await call(url);
       if (res.error) {
@@ -150,6 +151,26 @@
     profitMargin: (month, actorIds) => req("profit-margin", { month, actorIds: joinIds(actorIds) }),
     runStatistics: (month, actorIds) =>
       req("run-statistics/monthly/all-users", { month, actorIds: joinIds(actorIds) }),
+    // Acquisition tab. monthStartAt is "YYYY-MM-01"; portion (0..1] asks for
+    // only the first part of that month, the way the page builds its own
+    // pro-rated comparison baseline. An empty `actorIds=` means all Actors,
+    // which is exactly what the page itself sends.
+    monthlyMarketing: (monthStartAt, actorIds, portion) =>
+      req("monthly-marketing", {
+        actorIds: joinIds(actorIds) || "",
+        monthStartAt: `${String(monthStartAt).slice(0, 7)}-01T00:00:00.000Z`,
+        portionOfMonthElapsed: portion == null ? null : String(portion),
+      }),
+    // Every Actor the account owns (id, name, title, pictureUrl), the same
+    // list the Acquisition tab's Actor filter shows.
+    ownedActors: () => req("find-users-owned-actors-by-text", { text: "" }, `${HOST}/actors`),
+    // The Actor quality tab's score card: { actorQuality: 0..1,
+    // actorQualityPercentile: 0..1, hasReadme, ... }. The Console shows it
+    // as round(actorQuality * 100) out of 100.
+    actorQuality: (actorId) => req(`scores/${encodeURIComponent(actorId)}`, {}, `${HOST}/actor-quality`),
+    // The Actor's own settings record; we only read `notice`
+    // ("NONE" | "UNDER_MAINTENANCE") from it.
+    actorBasicInfo: (actorId) => req(`${encodeURIComponent(actorId)}/basic-info`, {}, `${HOST}/actor`),
     pooled,
   };
 })();
